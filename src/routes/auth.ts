@@ -6,6 +6,14 @@ import { requireAuth } from "../middleware/auth.js";
 
 const router = Router();
 
+const isProd = process.env.NODE_ENV === "production";
+const cookieOptions = {
+  httpOnly: true,
+  sameSite: (isProd ? "none" : "lax") as "none" | "lax",
+  secure: isProd,
+  maxAge: 7 * 86400_000,
+};
+
 router.post("/register", async (req, res) => {
   try {
     const { email, password } = req.body as { email?: string; password?: string };
@@ -19,7 +27,7 @@ router.post("/register", async (req, res) => {
     const user = await User.create({ email: email.trim().toLowerCase(), passwordHash });
     const token = signToken(user._id.toHexString());
 
-    res.cookie("token", token, { httpOnly: true, sameSite: "lax", maxAge: 7 * 86400_000 });
+    res.cookie("token", token, cookieOptions);
     res.status(201).json({ user: { id: user._id, email: user.email } });
   } catch (err) {
     console.error(err);
@@ -39,7 +47,7 @@ router.post("/login", async (req, res) => {
     if (!valid) return res.status(401).json({ error: "Invalid credentials" });
 
     const token = signToken(user._id.toHexString());
-    res.cookie("token", token, { httpOnly: true, sameSite: "lax", maxAge: 7 * 86400_000 });
+    res.cookie("token", token, cookieOptions);
     res.json({ user: { id: user._id, email: user.email } });
   } catch (err) {
     console.error(err);
@@ -48,7 +56,7 @@ router.post("/login", async (req, res) => {
 });
 
 router.post("/logout", (_req, res) => {
-  res.clearCookie("token").json({ ok: true });
+  res.clearCookie("token", cookieOptions).json({ ok: true });
 });
 
 router.get("/me", requireAuth, async (req, res) => {
