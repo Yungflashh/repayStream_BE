@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { RepaymentPlan } from "../models/RepaymentPlan.js";
 import { Customer } from "../models/Customer.js";
+import { Business } from "../models/Business.js";
 import { PaymentAttempt } from "../models/PaymentAttempt.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { verifyPaystackTransaction } from "../lib/paystack.js";
@@ -12,17 +13,22 @@ router.get("/plans/:id", async (req, res) => {
     const plan = await RepaymentPlan.findById(req.params.id).lean();
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
-    const customer = await Customer.findById(plan.customerId).lean();
+    const [customer, business] = await Promise.all([
+      Customer.findById(plan.customerId).lean(),
+      Business.findById(plan.businessId).lean(),
+    ]);
 
     res.json({
       plan: {
         id: plan._id,
+        plan_name: (plan as { planName?: string }).planName ?? null,
+        business_name: business?.name ?? null,
         total_amount: plan.totalAmount,
         status: plan.status,
         schedule_json: plan.scheduleJson,
         payment_method: plan.paymentMethod,
         customers: customer
-          ? { phone: customer.phone, email: customer.email }
+          ? { name: (customer as { name?: string }).name ?? null, phone: customer.phone, email: customer.email }
           : null,
       },
     });

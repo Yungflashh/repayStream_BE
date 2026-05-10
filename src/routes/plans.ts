@@ -22,18 +22,22 @@ router.get("/", async (req, res) => {
   const custMap = new Map(customers.map((c) => [c._id.toString(), c]));
 
   res.json({
-    plans: plans.map((p) => ({
-      id: p._id,
-      total_amount: p.totalAmount,
-      status: p.status,
-      customer_id: p.customerId,
-      payment_method: p.paymentMethod,
-      schedule_json: p.scheduleJson,
-      created_at: p.createdAt,
-      customers: custMap.get(p.customerId.toString())
-        ? { phone: custMap.get(p.customerId.toString())!.phone, email: custMap.get(p.customerId.toString())!.email }
-        : null,
-    })),
+    plans: plans.map((p) => {
+      const cust = custMap.get(p.customerId.toString());
+      return {
+        id: p._id,
+        plan_name: (p as { planName?: string }).planName ?? null,
+        total_amount: p.totalAmount,
+        status: p.status,
+        customer_id: p.customerId,
+        payment_method: p.paymentMethod,
+        schedule_json: p.scheduleJson,
+        created_at: p.createdAt,
+        customers: cust
+          ? { name: (cust as { name?: string }).name ?? null, phone: cust.phone, email: cust.email }
+          : null,
+      };
+    }),
   });
 });
 
@@ -52,13 +56,14 @@ router.get("/:id", async (req, res) => {
     res.json({
       plan: {
         id: plan._id,
+        plan_name: (plan as { planName?: string }).planName ?? null,
         total_amount: plan.totalAmount,
         status: plan.status,
         payment_method: plan.paymentMethod,
         schedule_json: plan.scheduleJson,
         created_at: plan.createdAt,
         customer: customer
-          ? { id: customer._id, phone: customer.phone, email: customer.email }
+          ? { id: customer._id, name: (customer as { name?: string }).name ?? null, phone: customer.phone, email: customer.email }
           : null,
       },
       attempts: attempts.map((a) => ({
@@ -86,7 +91,7 @@ router.post("/", async (req, res) => {
     const error = validatePlanBody(req.body as Record<string, unknown>);
     if (error) return res.status(400).json({ error });
 
-    const { customerPhone, customerEmail, totalAmount, paymentMethod, schedule } = req.body;
+    const { customerName, customerPhone, customerEmail, totalAmount, paymentMethod, schedule, planName } = req.body;
     const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
 
     // Idempotent replay check
@@ -104,15 +109,20 @@ router.post("/", async (req, res) => {
     let customer = await Customer.findOne({ businessId: biz._id, email: customerEmail.trim().toLowerCase() });
     if (!customer) {
       customer = await Customer.create({
+        name: customerName.trim(),
         phone: customerPhone.trim(),
         email: customerEmail.trim().toLowerCase(),
         businessId: biz._id,
       });
+    } else if (customerName?.trim()) {
+      customer.set("name", customerName.trim());
+      await customer.save();
     }
 
     const plan = await RepaymentPlan.create({
       businessId: biz._id,
       customerId: customer._id,
+      planName: planName?.trim() || undefined,
       totalAmount: parseFloat(totalAmount),
       scheduleJson: schedule,
       paymentMethod,

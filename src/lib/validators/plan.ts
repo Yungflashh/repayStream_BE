@@ -1,12 +1,16 @@
 type ScheduleRow = { amount: number; due_date: string };
 
 export function validatePlanBody(body: Record<string, unknown>): string | null {
-  const { customerPhone, customerEmail, totalAmount, paymentMethod, schedule } = body;
+  const { customerName, customerPhone, customerEmail, totalAmount, paymentMethod, schedule, planName } = body;
 
+  if (typeof customerName !== "string" || customerName.trim().length < 2)
+    return "customerName must be at least 2 characters";
   if (typeof customerPhone !== "string" || customerPhone.trim().length < 8)
     return "customerPhone must be at least 8 chars";
   if (typeof customerEmail !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail))
     return "Invalid customerEmail";
+  if (planName !== undefined && (typeof planName !== "string" || planName.trim().length > 120))
+    return "planName must be a string under 120 characters";
   if (typeof totalAmount !== "string" || !/^\d+(\.\d{1,2})?$/.test(totalAmount))
     return "totalAmount must be a decimal string with up to 2 places";
   if (paymentMethod !== "card")
