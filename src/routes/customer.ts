@@ -42,6 +42,17 @@ router.post("/claim", async (req, res) => {
   }
 });
 
+router.get("/mine", async (req, res) => {
+  try {
+    const customer = await Customer.findOne({ userId: req.userId }).lean();
+    if (!customer) return res.json({ customer: null });
+    res.json({ customer: { id: customer._id, phone: customer.phone, email: customer.email } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed" });
+  }
+});
+
 router.get("/:id/portal", async (req, res) => {
   try {
     const customer = await Customer.findById(req.params.id);
@@ -72,6 +83,7 @@ router.get("/:id/portal", async (req, res) => {
       customer: { id: customer._id, phone: customer.phone, email: customer.email },
       plans: plans.map((p) => ({
         id: p._id,
+        plan_name: (p as { planName?: string }).planName ?? null,
         total_amount: p.totalAmount,
         status: p.status,
         payment_method: p.paymentMethod,

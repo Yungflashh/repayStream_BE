@@ -15,7 +15,15 @@ router.post("/paystack", async (req, res) => {
       return res.status(401).json({ error: "Invalid signature" });
     }
 
-    const event = req.body as { event?: string; data?: { reference?: string; status?: string; gateway_response?: string } };
+    const event = req.body as {
+      event?: string;
+      data?: {
+        reference?: string;
+        status?: string;
+        gateway_response?: string;
+        authorization?: { authorization_code?: string; reusable?: boolean };
+      };
+    };
     if (event.event !== "charge.success" && event.event !== "charge.failed") {
       return res.sendStatus(200);
     }
@@ -35,16 +43,32 @@ router.post("/paystack", async (req, res) => {
     attempt.failureReason = failureReason;
     await attempt.save();
 
-    // Activate plan on successful payment
     if (newStatus === "success") {
-      await RepaymentPlan.findByIdAndUpdate(attempt.planId, { status: "active" });
-      await AuditLog.create({
-        actor: "webhook:paystack",
-        action: "plan_activated",
-        entityType: "repayment_plan",
-        entityId: attempt.planId,
-        payload: { previousStatus: "pending_mandate", newStatus: "active", paymentRef: ref },
-      });
+      const plan = await RepaymentPlan.findById(attempt.planId);
+      if (plan) {
+        const wasMandate = plan.status === "pending_mandate";
+        if (wasMandate) plan.status = "active";
+
+        // Save the authorization code so the scheduler can charge future installments
+        // without requiring the customer to be present.
+        const authCode = event.data?.authorization?.authorization_code;
+        if (authCode && event.data?.authorization?.reusable !== false) {
+          const existing = (plan as unknown as { authorizationCode?: string }).authorizationCode;
+          if (!existing) (plan as unknown as { authorizationCode: string }).authorizationCode = authCode;
+        }
+
+        await plan.save();
+
+        if (wasMandate) {
+          await AuditLog.create({
+            actor: "webhook:paystack",
+            action: "plan_activated",
+            entityType: "repayment_plan",
+            entityId: plan._id,
+            payload: { previousStatus: "pending_mandate", newStatus: "active", paymentRef: ref },
+          });
+        }
+      }
     }
 
     await AuditLog.create({

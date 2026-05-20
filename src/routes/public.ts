@@ -27,6 +27,7 @@ router.get("/plans/:id", async (req, res) => {
         status: plan.status,
         schedule_json: plan.scheduleJson,
         payment_method: plan.paymentMethod,
+        customer_id: plan.customerId.toString(),
         customers: customer
           ? { name: (customer as { name?: string }).name ?? null, phone: customer.phone, email: customer.email }
           : null,
@@ -67,10 +68,18 @@ router.get("/plans/:id/verify", async (req, res) => {
         attempt.status = "success";
         await attempt.save();
 
-        // Activate the plan
-        if (plan.status === "pending_mandate") {
-          plan.status = "active";
+        // Activate the plan and save the authorization code if not already stored
+        const wasMandate = plan.status === "pending_mandate";
+        if (wasMandate) plan.status = "active";
+        if (verification.authorization_code) {
+          const existing = (plan as unknown as { authorizationCode?: string }).authorizationCode;
+          if (!existing) (plan as unknown as { authorizationCode: string }).authorizationCode = verification.authorization_code;
+        }
+        if (wasMandate || verification.authorization_code) {
           await plan.save();
+        }
+
+        if (wasMandate) {
           await AuditLog.create({
             actor: "verify:paystack",
             action: "plan_activated",

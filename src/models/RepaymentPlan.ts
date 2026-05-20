@@ -5,11 +5,13 @@ const repaymentPlanSchema = new Schema(
     businessId: { type: Types.ObjectId, ref: "Business", required: true },
     customerId: { type: Types.ObjectId, ref: "Customer", required: true },
     planName: { type: String, trim: true },
+    group: { type: String, trim: true },
     totalAmount: { type: Number, required: true },
     scheduleJson: { type: Schema.Types.Mixed, required: true },
     status: { type: String, default: "pending_mandate" },
     idempotencyKey: { type: String },
     paymentMethod: { type: String, enum: ["card"], default: "card" },
+    authorizationCode: { type: String },
   },
   { timestamps: true }
 );

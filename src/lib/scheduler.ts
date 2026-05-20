@@ -2,9 +2,8 @@ import { RepaymentPlan } from "../models/RepaymentPlan.js";
 import { PaymentAttempt } from "../models/PaymentAttempt.js";
 import { Customer } from "../models/Customer.js";
 import { AuditLog } from "../models/AuditLog.js";
-import { initializePaystackTransaction } from "./paystack.js";
+import { chargeAuthorization } from "./paystack.js";
 
-const APP_URL = () => process.env.PUBLIC_APP_URL ?? "http://localhost:5173";
 
 type ScheduleRow = { amount: number; due_date: string };
 
@@ -101,73 +100,58 @@ export async function processScheduledPayments() {
         continue;
       }
 
+      const authCode = (plan as unknown as { authorizationCode?: string }).authorizationCode;
+      if (!authCode) {
+        console.warn(`[scheduler] Plan ${plan._id} has no authorization code — mandate not yet captured, skipping`);
+        await AuditLog.create({
+          actor: "system:scheduler",
+          action: "installment_skipped",
+          entityType: "repayment_plan",
+          entityId: plan._id,
+          payload: { reason: "no_authorization_code", installmentIndex: paidCount + 1 },
+        });
+        continue;
+      }
+
       const totalAttempts = await PaymentAttempt.countDocuments({ planId: plan._id });
       const customer = await Customer.findById(plan.customerId);
       const email = customer?.email ?? "customer@repaystream.local";
       const amount = nextInstallment.amount;
+      const reference = `rs_${plan._id}_inst${paidCount + 1}_${Date.now()}`;
+      const amountKobo = Math.max(Math.round(amount * 100), 200);
 
-      if (plan.paymentMethod === "card") {
-        const reference = `rs_${plan._id}_inst${paidCount + 1}_${Date.now()}`;
-        const amountKobo = Math.max(Math.round(amount * 100), 200);
+      const attempt = await PaymentAttempt.create({
+        planId: plan._id,
+        attemptNumber: totalAttempts + 1,
+        amount,
+        status: "pending",
+        provider: "paystack",
+        externalRef: reference,
+        idempotencyKey: reference,
+      });
 
-        await PaymentAttempt.create({
-          planId: plan._id,
-          attemptNumber: totalAttempts + 1,
-          amount,
-          status: "pending",
-          provider: "paystack",
-          externalRef: reference,
-          idempotencyKey: reference,
-        });
+      // Charge the stored authorization directly — no customer interaction needed
+      const result = await chargeAuthorization({ authorizationCode: authCode, email, amount: amountKobo, reference });
 
-        // Note: For recurring charges, Paystack requires the authorization code
-        // from the first successful charge. For now, we initialize a new transaction
-        // that the customer will need to complete via the plan link.
-        await initializePaystackTransaction({
-          email,
-          amount: amountKobo,
-          reference,
-          callbackUrl: `${APP_URL()}/plan/${plan._id}?trxref=${reference}`,
-        });
-
-        await AuditLog.create({
-          actor: "system:scheduler",
-          action: "installment_initiated",
-          entityType: "repayment_plan",
-          entityId: plan._id,
-          payload: { installmentIndex: paidCount + 1, amount, provider: "paystack", reference },
-        });
-      } else {
-        const reference = `rs_${plan._id}_inst${paidCount + 1}_${Date.now()}`;
-        const amountKobo = Math.max(Math.round(amount * 100), 200);
-
-        await PaymentAttempt.create({
-          planId: plan._id,
-          attemptNumber: totalAttempts + 1,
-          amount,
-          status: "pending",
-          provider: "paystack",
-          externalRef: reference,
-          idempotencyKey: reference,
-        });
-
-        await initializePaystackTransaction({
-          email,
-          amount: amountKobo,
-          reference,
-          callbackUrl: `${APP_URL()}/plan/${plan._id}?trxref=${reference}`,
-        });
-
-        await AuditLog.create({
-          actor: "system:scheduler",
-          action: "installment_initiated",
-          entityType: "repayment_plan",
-          entityId: plan._id,
-          payload: { installmentIndex: paidCount + 1, amount, provider: "paystack", reference },
-        });
+      if (result.status === "success") {
+        attempt.status = "success";
+        await attempt.save();
+      } else if (result.status === "failed") {
+        attempt.status = "failed";
+        attempt.failureReason = result.gateway_response || "gateway_declined";
+        await attempt.save();
       }
+      // "pending" — leave as pending; webhook will resolve it asynchronously
 
-      console.log(`[scheduler] Initiated installment ${paidCount + 1} for plan ${plan._id} — ₦${amount}`);
+      await AuditLog.create({
+        actor: "system:scheduler",
+        action: "installment_charged",
+        entityType: "repayment_plan",
+        entityId: plan._id,
+        payload: { installmentIndex: paidCount + 1, amount, provider: "paystack", reference, chargeStatus: result.status },
+      });
+
+      console.log(`[scheduler] Charged installment ${paidCount + 1} for plan ${plan._id} — ₦${amount} — ${result.status}`);
     } catch (err) {
       console.error(`[scheduler] Error processing plan ${plan._id}:`, err);
     }

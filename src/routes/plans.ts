@@ -27,6 +27,7 @@ router.get("/", async (req, res) => {
       return {
         id: p._id,
         plan_name: (p as { planName?: string }).planName ?? null,
+        group: (p as { group?: string }).group ?? null,
         total_amount: p.totalAmount,
         status: p.status,
         customer_id: p.customerId,
@@ -91,7 +92,7 @@ router.post("/", async (req, res) => {
     const error = validatePlanBody(req.body as Record<string, unknown>);
     if (error) return res.status(400).json({ error });
 
-    const { customerName, customerPhone, customerEmail, totalAmount, paymentMethod, schedule, planName } = req.body;
+    const { customerName, customerPhone, customerEmail, totalAmount, paymentMethod, schedule, planName, group } = req.body;
     const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
 
     // Idempotent replay check
@@ -99,7 +100,7 @@ router.post("/", async (req, res) => {
       const existing = await RepaymentPlan.findOne({ businessId: biz._id, idempotencyKey });
       if (existing) {
         return res.json({
-          plan: { id: existing._id },
+          plan: { id: existing._id, customerId: existing.customerId.toString() },
           idempotentReplay: true,
         });
       }
@@ -123,13 +124,14 @@ router.post("/", async (req, res) => {
       businessId: biz._id,
       customerId: customer._id,
       planName: planName?.trim() || undefined,
+      group: (group as string | undefined)?.trim() || undefined,
       totalAmount: parseFloat(totalAmount),
       scheduleJson: schedule,
       paymentMethod,
       idempotencyKey: idempotencyKey || undefined,
     });
 
-    res.status(201).json({ plan: { id: plan._id }, idempotentReplay: false });
+    res.status(201).json({ plan: { id: plan._id, customerId: customer._id.toString() }, idempotentReplay: false });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create plan" });

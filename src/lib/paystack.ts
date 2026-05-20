@@ -23,6 +23,7 @@ export async function initializePaystackTransaction(opts: {
       amount: opts.amount,
       reference: opts.reference,
       callback_url: opts.callbackUrl,
+      channels: ["card", "bank"],
     }),
   });
 
@@ -35,6 +36,7 @@ export async function verifyPaystackTransaction(reference: string): Promise<{
   status: "success" | "failed" | "abandoned" | "pending";
   amount: number; // kobo
   gateway_response: string;
+  authorization_code?: string;
 }> {
   const key = PAYSTACK_SECRET();
   if (!key) {
@@ -48,7 +50,7 @@ export async function verifyPaystackTransaction(reference: string): Promise<{
 
   const json = (await res.json()) as {
     status: boolean;
-    data?: { status: string; amount: number; gateway_response: string };
+    data?: { status: string; amount: number; gateway_response: string; authorization?: { authorization_code?: string; reusable?: boolean } };
     message?: string;
   };
 
@@ -58,5 +60,53 @@ export async function verifyPaystackTransaction(reference: string): Promise<{
 
   const s = json.data.status;
   const mapped = s === "success" ? "success" : s === "failed" ? "failed" : s === "abandoned" ? "abandoned" : "pending";
-  return { status: mapped, amount: json.data.amount, gateway_response: json.data.gateway_response };
+  const authorization_code = json.data.authorization?.reusable !== false
+    ? json.data.authorization?.authorization_code
+    : undefined;
+  return { status: mapped, amount: json.data.amount, gateway_response: json.data.gateway_response, authorization_code };
+}
+
+export async function chargeAuthorization(opts: {
+  authorizationCode: string;
+  email: string;
+  amount: number; // kobo
+  reference: string;
+}): Promise<{
+  status: "success" | "failed" | "pending";
+  gateway_response: string;
+  amount: number;
+}> {
+  const key = PAYSTACK_SECRET();
+  if (!key) {
+    console.warn("[paystack] no secret key — cannot charge authorization");
+    return { status: "pending", gateway_response: "no key", amount: 0 };
+  }
+
+  const res = await fetch("https://api.paystack.co/transaction/charge_authorization", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      authorization_code: opts.authorizationCode,
+      email: opts.email,
+      amount: opts.amount,
+      reference: opts.reference,
+    }),
+  });
+
+  const json = (await res.json()) as {
+    status: boolean;
+    data?: { status: string; gateway_response: string; amount: number };
+    message?: string;
+  };
+
+  if (!json.status || !json.data) {
+    return { status: "failed", gateway_response: json.message ?? "charge failed", amount: 0 };
+  }
+
+  const s = json.data.status;
+  const mapped = s === "success" ? "success" : s === "failed" ? "failed" : "pending";
+  return { status: mapped, gateway_response: json.data.gateway_response, amount: json.data.amount };
 }
