@@ -9,7 +9,7 @@ const router = Router();
 const isProd = process.env.NODE_ENV === "production";
 const cookieOptions = {
   httpOnly: true,
-  sameSite: "lax" as const,
+  sameSite: (isProd ? "none" : "lax") as "none" | "lax",
   secure: isProd,
   maxAge: 7 * 86400_000,
 };
@@ -28,7 +28,7 @@ router.post("/register", async (req, res) => {
     const token = signToken(user._id.toHexString());
 
     res.cookie("token", token, cookieOptions);
-    res.status(201).json({ user: { id: user._id, email: user.email } });
+    res.status(201).json({ user: { id: user._id, email: user.email }, token });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Registration failed" });
@@ -48,7 +48,7 @@ router.post("/login", async (req, res) => {
 
     const token = signToken(user._id.toHexString());
     res.cookie("token", token, cookieOptions);
-    res.json({ user: { id: user._id, email: user.email } });
+    res.json({ user: { id: user._id, email: user.email }, token });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Login failed" });

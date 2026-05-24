@@ -9,8 +9,14 @@ declare global {
   }
 }
 
+function extractToken(req: Request): string | undefined {
+  const auth = req.headers.authorization;
+  if (auth?.startsWith("Bearer ")) return auth.slice(7);
+  return req.cookies?.token as string | undefined;
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const token = req.cookies?.token as string | undefined;
+  const token = extractToken(req);
   if (!token) return res.status(401).json({ error: "Not authenticated" });
   const payload = verifyToken(token);
   if (!payload) return res.status(401).json({ error: "Invalid token" });
@@ -19,7 +25,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 export function optionalAuth(req: Request, _res: Response, next: NextFunction) {
-  const token = req.cookies?.token as string | undefined;
+  const token = extractToken(req);
   if (token) {
     const payload = verifyToken(token);
     if (payload) req.userId = payload.sub;

@@ -22,6 +22,7 @@ const app = express();
 const PORT = parseInt(process.env.PORT ?? "4000", 10);
 
 // CORS
+console.log("[cors] CLIENT_ORIGIN =", process.env.CLIENT_ORIGIN);
 app.use(
   cors({
     origin: process.env.CLIENT_ORIGIN ?? "http://localhost:5173",
@@ -43,6 +44,9 @@ app.use(
 );
 
 app.use(express.json());
+
+// Health check
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 // API routes
 app.use("/api/auth", authRoutes);
