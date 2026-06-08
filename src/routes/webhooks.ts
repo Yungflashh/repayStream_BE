@@ -4,6 +4,7 @@ import { RepaymentPlan } from "../models/RepaymentPlan.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { verifyPaystackSignature } from "../lib/webhooks/paystack-verify.js";
 import { nextRetryDate } from "../lib/retry-policy.js";
+import { sendFailedAttemptReminder } from "../services/reminder.js";
 
 const router = Router();
 
@@ -80,6 +81,8 @@ router.post("/paystack", async (req, res) => {
     });
 
     if (newStatus === "failed") {
+      void sendFailedAttemptReminder(attempt._id);
+
       const retryDate = nextRetryDate(attempt.createdAt, attempt.attemptNumber, failureReason);
       if (retryDate) {
         await AuditLog.create({

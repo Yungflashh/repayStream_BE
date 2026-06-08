@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 
 import { connectDB } from "./db.js";
 import { startScheduler } from "./lib/scheduler.js";
+import { startReminderScheduler } from "./lib/reminder-scheduler.js";
 import authRoutes from "./routes/auth.js";
 import businessRoutes from "./routes/business.js";
 import planRoutes from "./routes/plans.js";
@@ -71,6 +72,7 @@ app.get("*", (_req, res) => {
 async function start() {
   await connectDB();
   startScheduler();
+  startReminderScheduler();
   app.listen(PORT, () => {
     console.log(`[server] running on http://localhost:${PORT}`);
   });

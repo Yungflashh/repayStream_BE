@@ -3,6 +3,7 @@ import { PaymentAttempt } from "../models/PaymentAttempt.js";
 import { Customer } from "../models/Customer.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { chargeAuthorization } from "./paystack.js";
+import { sendFailedAttemptReminder } from "../services/reminder.js";
 
 
 type ScheduleRow = { amount: number; due_date: string };
@@ -140,6 +141,7 @@ export async function processScheduledPayments() {
         attempt.status = "failed";
         attempt.failureReason = result.gateway_response || "gateway_declined";
         await attempt.save();
+        void sendFailedAttemptReminder(attempt._id);
       }
       // "pending" — leave as pending; webhook will resolve it asynchronously
 
