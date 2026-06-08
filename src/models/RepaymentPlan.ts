@@ -12,6 +12,13 @@ const repaymentPlanSchema = new Schema(
     idempotencyKey: { type: String },
     paymentMethod: { type: String, enum: ["card"], default: "card" },
     authorizationCode: { type: String },
+    feeStrategy: { type: String, enum: ["absorb", "pass_to_customer"], default: "absorb" },
+    notes: [
+      {
+        text: { type: String, required: true },
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
   },
   { timestamps: true }
 );

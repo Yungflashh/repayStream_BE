@@ -16,6 +16,7 @@ import publicRoutes from "./routes/public.js";
 import webhookRoutes from "./routes/webhooks.js";
 import disputeRoutes from "./routes/disputes.js";
 import ledgerRoutes from "./routes/ledger.js";
+import offlinePaymentRoutes from "./routes/offline-payments.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -58,6 +59,7 @@ app.use("/api/public", publicRoutes);
 app.use("/api/webhooks", webhookRoutes);
 app.use("/api/disputes", disputeRoutes);
 app.use("/api/ledger", ledgerRoutes);
+app.use("/api/offline", offlinePaymentRoutes);
 
 // Serve client in production
 const clientDist = path.resolve(__dirname, "../../client/dist");

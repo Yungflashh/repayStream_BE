@@ -4,6 +4,7 @@ import { Business } from "../models/Business.js";
 import { Customer } from "../models/Customer.js";
 import { RepaymentPlan } from "../models/RepaymentPlan.js";
 import { PaymentAttempt } from "../models/PaymentAttempt.js";
+import { AuditLog } from "../models/AuditLog.js";
 import { validatePlanBody } from "../lib/validators/plan.js";
 
 const router = Router();
@@ -61,8 +62,13 @@ router.get("/:id", async (req, res) => {
         total_amount: plan.totalAmount,
         status: plan.status,
         payment_method: plan.paymentMethod,
+        fee_strategy: (plan as { feeStrategy?: string }).feeStrategy ?? "absorb",
         schedule_json: plan.scheduleJson,
         created_at: plan.createdAt,
+        notes: ((plan as { notes?: { text: string; createdAt: Date }[] }).notes ?? []).map((n) => ({
+          text: n.text,
+          created_at: n.createdAt,
+        })),
         customer: customer
           ? { id: customer._id, name: (customer as { name?: string }).name ?? null, phone: customer.phone, email: customer.email }
           : null,
@@ -92,7 +98,7 @@ router.post("/", async (req, res) => {
     const error = validatePlanBody(req.body as Record<string, unknown>);
     if (error) return res.status(400).json({ error });
 
-    const { customerName, customerPhone, customerEmail, totalAmount, paymentMethod, schedule, planName, group } = req.body;
+    const { customerName, customerPhone, customerEmail, totalAmount, paymentMethod, schedule, planName, group, feeStrategy } = req.body;
     const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
 
     // Idempotent replay check
@@ -128,6 +134,7 @@ router.post("/", async (req, res) => {
       totalAmount: parseFloat(totalAmount),
       scheduleJson: schedule,
       paymentMethod,
+      feeStrategy: feeStrategy === "pass_to_customer" ? "pass_to_customer" : "absorb",
       idempotencyKey: idempotencyKey || undefined,
     });
 
@@ -135,6 +142,76 @@ router.post("/", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create plan" });
+  }
+});
+
+// Pause / resume / cancel a plan
+router.patch("/:id/status", async (req, res) => {
+  try {
+    const biz = await Business.findOne({ userId: req.userId });
+    if (!biz) return res.status(403).json({ error: "No business" });
+
+    const { action } = req.body as { action?: string };
+    if (!action || !["pause", "resume", "cancel"].includes(action)) {
+      return res.status(400).json({ error: "action must be one of: pause, resume, cancel" });
+    }
+
+    const plan = await RepaymentPlan.findOne({ _id: req.params.id, businessId: biz._id });
+    if (!plan) return res.status(404).json({ error: "Plan not found" });
+
+    const prev = plan.status;
+    let next: string;
+    if (action === "pause") {
+      if (plan.status !== "active") return res.status(400).json({ error: "Only active plans can be paused" });
+      next = "paused";
+    } else if (action === "resume") {
+      if (plan.status !== "paused") return res.status(400).json({ error: "Only paused plans can be resumed" });
+      next = "active";
+    } else {
+      if (["completed", "cancelled"].includes(plan.status)) {
+        return res.status(400).json({ error: "Plan is already completed or cancelled" });
+      }
+      next = "cancelled";
+    }
+
+    plan.status = next;
+    await plan.save();
+
+    await AuditLog.create({
+      actor: `business:${biz._id}`,
+      action: `plan_${action}d`,
+      entityType: "repayment_plan",
+      entityId: plan._id,
+      payload: { previousStatus: prev, newStatus: next },
+    });
+
+    res.json({ ok: true, status: next });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update plan status" });
+  }
+});
+
+// Add a business note to a plan
+router.post("/:id/notes", async (req, res) => {
+  try {
+    const biz = await Business.findOne({ userId: req.userId });
+    if (!biz) return res.status(403).json({ error: "No business" });
+
+    const { text } = req.body as { text?: string };
+    if (!text?.trim()) return res.status(400).json({ error: "Note text required" });
+
+    const plan = await RepaymentPlan.findOne({ _id: req.params.id, businessId: biz._id });
+    if (!plan) return res.status(404).json({ error: "Plan not found" });
+
+    const note = { text: text.trim(), createdAt: new Date() };
+    (plan as any).notes.push(note);
+    await plan.save();
+
+    res.json({ ok: true, note: { text: note.text, created_at: note.createdAt } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to add note" });
   }
 });
 

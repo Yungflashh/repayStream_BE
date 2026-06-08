@@ -72,8 +72,7 @@ router.get("/plans/:id/verify", async (req, res) => {
         const wasMandate = plan.status === "pending_mandate";
         if (wasMandate) plan.status = "active";
         if (verification.authorization_code) {
-          const existing = (plan as unknown as { authorizationCode?: string }).authorizationCode;
-          if (!existing) (plan as unknown as { authorizationCode: string }).authorizationCode = verification.authorization_code;
+          (plan as unknown as { authorizationCode: string }).authorizationCode = verification.authorization_code;
         }
         if (wasMandate || verification.authorization_code) {
           await plan.save();
