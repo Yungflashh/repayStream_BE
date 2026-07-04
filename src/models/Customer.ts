@@ -7,6 +7,8 @@ const customerSchema = new Schema(
     email: { type: String, trim: true },
     businessId: { type: Types.ObjectId, ref: "Business", required: true },
     userId: { type: Types.ObjectId, ref: "User" }, // linked when customer claims portal
+    setupToken: { type: String, default: null },
+    setupTokenExpiry: { type: Date, default: null },
   },
   { timestamps: true }
 );

@@ -5,6 +5,7 @@ import { DisputeMessage } from "../models/DisputeMessage.js";
 import { Customer } from "../models/Customer.js";
 import { Business } from "../models/Business.js";
 import { AuditLog } from "../models/AuditLog.js";
+import { notifyDisputeMessage, notifyDisputeStatusChanged } from "../services/dispute-notifications.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -70,6 +71,11 @@ router.post("/", async (req, res) => {
       payload: { subject, category },
     });
 
+    // Change B: notify business fire-and-forget
+    void notifyDisputeMessage(String(thread._id), "customer").catch((err) =>
+      console.error("[disputes] notifyDisputeMessage error:", err)
+    );
+
     res.status(201).json({ thread: { id: thread._id, status: thread.status } });
   } catch (err) {
     console.error(err);
@@ -78,6 +84,7 @@ router.post("/", async (req, res) => {
 });
 
 // List dispute threads for current user
+// Change A: populate customer name and email
 router.get("/", async (req, res) => {
   try {
     const customer = await Customer.findOne({ userId: req.userId });
@@ -96,14 +103,24 @@ router.get("/", async (req, res) => {
       return res.json({ threads: [] });
     }
 
+    // Batch-load customers for all threads (only relevant when viewing as business)
+    const customerIds = [...new Set(threads.map((t) => (t as any).customerId.toString()))];
+    const customers = await Customer.find({ _id: { $in: customerIds } }).lean();
+    const custMap = new Map(customers.map((c) => [c._id.toString(), c]));
+
     res.json({
-      threads: threads.map((t) => ({
-        id: t._id,
-        subject: t.subject,
-        status: t.status,
-        category: t.category,
-        created_at: t.createdAt,
-      })),
+      threads: threads.map((t) => {
+        const cust = custMap.get((t as any).customerId.toString());
+        return {
+          id: t._id,
+          subject: (t as any).subject,
+          status: (t as any).status,
+          category: (t as any).category,
+          created_at: (t as any).createdAt,
+          customer_name: (cust as any)?.name ?? null,
+          customer_email: (cust as any)?.email ?? null,
+        };
+      }),
     });
   } catch (err) {
     console.error(err);
@@ -149,6 +166,7 @@ router.get("/:threadId/messages", async (req, res) => {
 });
 
 // Post a message to a thread
+// Change C: notify other party fire-and-forget
 router.post("/:threadId/messages", async (req, res) => {
   try {
     const { body: messageBody } = req.body as { body?: string };
@@ -178,6 +196,12 @@ router.post("/:threadId/messages", async (req, res) => {
       await thread.save();
     }
 
+    // Change C: notify the other party fire-and-forget
+    const threadId = req.params.threadId;
+    void notifyDisputeMessage(threadId, senderType as "customer" | "business").catch((err) =>
+      console.error("[disputes] notifyDisputeMessage error:", err)
+    );
+
     res.status(201).json({
       message: { id: msg._id, sender_type: senderType, body: msg.body, created_at: msg.createdAt },
     });
@@ -188,9 +212,10 @@ router.post("/:threadId/messages", async (req, res) => {
 });
 
 // Update thread status (business only)
+// Change D: allow re-open + resolutionNote
 router.patch("/:threadId/status", async (req, res) => {
   try {
-    const { status } = req.body as { status?: string };
+    const { status, resolutionNote } = req.body as { status?: string; resolutionNote?: string };
     if (!status || !["open", "in_progress", "resolved", "closed"].includes(status)) {
       return res.status(400).json({ error: "Invalid status" });
     }
@@ -202,8 +227,24 @@ router.patch("/:threadId/status", async (req, res) => {
     if (!thread) return res.status(404).json({ error: "Thread not found" });
 
     thread.status = status as any;
-    if (status === "resolved") thread.resolvedAt = new Date();
+
+    if (resolutionNote !== undefined) {
+      (thread as any).resolutionNote = resolutionNote;
+    }
+
+    if (status === "resolved" || status === "closed") {
+      thread.resolvedAt = new Date();
+    } else if (status === "open" || status === "in_progress") {
+      thread.resolvedAt = undefined;
+    }
+
     await thread.save();
+
+    // Change D: notify customer of status change fire-and-forget
+    const threadId = req.params.threadId;
+    void notifyDisputeStatusChanged(threadId, status, resolutionNote).catch((err) =>
+      console.error("[disputes] notifyDisputeStatusChanged error:", err)
+    );
 
     res.json({ status: thread.status });
   } catch (err) {

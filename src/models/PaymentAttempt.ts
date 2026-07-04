@@ -3,7 +3,7 @@ import { Schema, model, Types } from "mongoose";
 const paymentAttemptSchema = new Schema(
   {
     planId: { type: Types.ObjectId, ref: "RepaymentPlan", required: true },
-    attemptNumber: { type: Number, required: true, min: 1, max: 3 },
+    attemptNumber: { type: Number, required: true, min: 0 },
     amount: { type: Number, required: true },
     status: { type: String, default: "pending" },
     idempotencyKey: { type: String, unique: true },
@@ -15,5 +15,6 @@ const paymentAttemptSchema = new Schema(
 );
 
 paymentAttemptSchema.index({ planId: 1 });
+paymentAttemptSchema.index({ planId: 1, status: 1 });
 
 export const PaymentAttempt = model("PaymentAttempt", paymentAttemptSchema);

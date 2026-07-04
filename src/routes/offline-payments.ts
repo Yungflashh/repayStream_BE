@@ -170,6 +170,11 @@ router.post("/customer/:customerId/plans/:planId/submit", async (req, res) => {
     const plan = await RepaymentPlan.findOne({ _id: req.params.planId, customerId: customer._id });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
+    // Don't accept submissions for terminal plan states
+    if (["completed", "cancelled"].includes(plan.status)) {
+      return res.status(400).json({ error: "Cannot submit payment for a completed or cancelled plan" });
+    }
+
     const { amount, method, notes, proofUrl } = req.body as {
       amount?: number; method?: string; notes?: string; proofUrl?: string;
     };

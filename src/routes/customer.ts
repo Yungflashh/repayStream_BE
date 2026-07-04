@@ -3,6 +3,8 @@ import { requireAuth } from "../middleware/auth.js";
 import { Customer } from "../models/Customer.js";
 import { RepaymentPlan } from "../models/RepaymentPlan.js";
 import { PaymentAttempt } from "../models/PaymentAttempt.js";
+import { OfflinePayment } from "../models/OfflinePayment.js";
+import { Business } from "../models/Business.js";
 import { User } from "../models/User.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { chargeAuthorization, initializePaystackTransaction } from "../lib/paystack.js";
@@ -19,10 +21,9 @@ router.post("/claim", async (req, res) => {
     if (!user) return res.status(401).json({ error: "Not authenticated" });
 
     const customer = await Customer.findById(customerId);
-    if (!customer) return res.status(404).json({ error: "Customer not found" });
-
-    if (customer.email?.toLowerCase() !== user.email.toLowerCase()) {
-      return res.status(403).json({ error: "Email does not match" });
+    // Return 401 for both "not found" and "email mismatch" to prevent customer ID enumeration
+    if (!customer || customer.email?.toLowerCase() !== user.email.toLowerCase()) {
+      return res.status(401).json({ error: "Customer not found or email does not match" });
     }
 
     customer.userId = user._id as any;
@@ -67,11 +68,14 @@ router.get("/:id/portal", async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    // Fetch all payment attempts for the customer's plans
     const planIds = plans.map((p) => p._id);
-    const allAttempts = await PaymentAttempt.find({ planId: { $in: planIds } })
-      .sort({ createdAt: 1 })
-      .lean();
+    const businessIds = [...new Set(plans.map((p) => p.businessId.toString()))];
+
+    const [allAttempts, offlinePayments, businesses] = await Promise.all([
+      PaymentAttempt.find({ planId: { $in: planIds } }).sort({ createdAt: 1 }).lean(),
+      OfflinePayment.find({ planId: { $in: planIds } }).sort({ createdAt: -1 }).lean(),
+      Business.find({ _id: { $in: businessIds } }).lean(),
+    ]);
 
     const attemptsByPlan = new Map<string, typeof allAttempts>();
     for (const a of allAttempts) {
@@ -80,26 +84,54 @@ router.get("/:id/portal", async (req, res) => {
       attemptsByPlan.get(key)!.push(a);
     }
 
+    const offlineByPlan = new Map<string, typeof offlinePayments>();
+    for (const op of offlinePayments) {
+      const key = op.planId.toString();
+      if (!offlineByPlan.has(key)) offlineByPlan.set(key, []);
+      offlineByPlan.get(key)!.push(op);
+    }
+
+    const bizMap = new Map(businesses.map((b) => [b._id.toString(), b]));
+
     res.json({
       customer: { id: customer._id, phone: customer.phone, email: customer.email },
-      plans: plans.map((p) => ({
-        id: p._id,
-        plan_name: (p as { planName?: string }).planName ?? null,
-        total_amount: p.totalAmount,
-        status: p.status,
-        payment_method: p.paymentMethod,
-        schedule_json: p.scheduleJson,
-        created_at: p.createdAt,
-        attempts: (attemptsByPlan.get(p._id.toString()) ?? []).map((a) => ({
-          id: a._id,
-          attempt_number: a.attemptNumber,
-          amount: a.amount,
-          status: a.status,
-          provider: a.provider,
-          failure_reason: a.failureReason,
-          created_at: a.createdAt,
-        })),
-      })),
+      plans: plans.map((p) => {
+        const biz = bizMap.get(p.businessId.toString());
+        return {
+          id: p._id,
+          plan_name: (p as { planName?: string }).planName ?? null,
+          business_name: (biz as { name?: string } | undefined)?.name ?? null,
+          total_amount: p.totalAmount,
+          status: p.status,
+          payment_method: p.paymentMethod,
+          fee_strategy: (p as { feeStrategy?: string }).feeStrategy ?? "absorb",
+          schedule_json: p.scheduleJson,
+          created_at: p.createdAt,
+          notes: ((p as { notes?: { text: string; createdAt: Date }[] }).notes ?? []).map((n) => ({
+            text: n.text,
+            created_at: n.createdAt,
+          })),
+          attempts: (attemptsByPlan.get(p._id.toString()) ?? []).map((a) => ({
+            id: a._id,
+            attempt_number: a.attemptNumber,
+            amount: a.amount,
+            status: a.status,
+            provider: a.provider,
+            failure_reason: a.failureReason,
+            created_at: a.createdAt,
+          })),
+          offline_payments: (offlineByPlan.get(p._id.toString()) ?? []).map((op) => ({
+            id: op._id,
+            amount: op.amount,
+            method: op.method,
+            notes: op.notes,
+            proof_url: op.proofUrl,
+            status: op.status,
+            recorded_by: op.recordedBy,
+            created_at: op.createdAt,
+          })),
+        };
+      }),
     });
   } catch (err) {
     console.error(err);
@@ -135,6 +167,10 @@ router.post("/:id/plans/:planId/retry-debit", async (req, res) => {
     const authCode = (plan as any).authorizationCode as string | undefined;
     if (!authCode) return res.status(400).json({ error: "No payment method on file. Update your payment method first." });
 
+    // Prevent double-charge: reject if a payment is already in progress
+    const existingPending = await PaymentAttempt.findOne({ planId: plan._id, status: "pending" });
+    if (existingPending) return res.status(409).json({ error: "A payment is already in progress for this plan." });
+
     const schedule = parseScheduleForCustomer(plan);
     const successCount = await PaymentAttempt.countDocuments({ planId: plan._id, status: "success" });
     const nextInstallment = schedule[successCount];
@@ -150,19 +186,28 @@ router.post("/:id/plans/:planId/retry-debit", async (req, res) => {
       status: "pending", provider: "paystack", externalRef: reference, idempotencyKey: reference,
     });
 
-    const result = await chargeAuthorization({ authorizationCode: authCode, email, amount: amountKobo, reference });
+    let chargeResult: { status: string; gateway_response?: string };
+    try {
+      chargeResult = await chargeAuthorization({ authorizationCode: authCode, email, amount: amountKobo, reference });
+    } catch (chargeErr) {
+      // Mark attempt failed if the charge call itself throws
+      attempt.status = "failed";
+      attempt.failureReason = "gateway_error";
+      await attempt.save();
+      throw chargeErr;
+    }
 
-    if (result.status === "success") { attempt.status = "success"; await attempt.save(); }
-    else if (result.status === "failed") { attempt.status = "failed"; attempt.failureReason = result.gateway_response || "gateway_declined"; await attempt.save(); }
+    if (chargeResult.status === "success") { attempt.status = "success"; await attempt.save(); }
+    else if (chargeResult.status === "failed") { attempt.status = "failed"; attempt.failureReason = chargeResult.gateway_response || "gateway_declined"; await attempt.save(); }
 
-    if (plan.status === "defaulted" && result.status === "success") {
+    if (plan.status === "defaulted" && chargeResult.status === "success") {
       plan.status = "active";
       await plan.save();
     }
 
-    await AuditLog.create({ actor: `customer:${customer._id}`, action: "customer_retry_debit", entityType: "repayment_plan", entityId: plan._id, payload: { reference, status: result.status } });
+    await AuditLog.create({ actor: `customer:${customer._id}`, action: "customer_retry_debit", entityType: "repayment_plan", entityId: plan._id, payload: { reference, status: chargeResult.status } });
 
-    res.json({ ok: true, status: result.status, message: result.gateway_response });
+    res.json({ ok: true, status: chargeResult.status, message: chargeResult.gateway_response });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Retry failed" });
@@ -177,6 +222,10 @@ router.post("/:id/plans/:planId/pay-now", async (req, res) => {
 
     const plan = await RepaymentPlan.findOne({ _id: req.params.planId, customerId: customer._id });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
+
+    // Prevent duplicate pending attempts
+    const existingPending = await PaymentAttempt.findOne({ planId: plan._id, status: "pending" });
+    if (existingPending) return res.status(409).json({ error: "A payment is already in progress for this plan." });
 
     const schedule = parseScheduleForCustomer(plan);
     const successCount = await PaymentAttempt.countDocuments({ planId: plan._id, status: "success" });
@@ -213,6 +262,10 @@ router.post("/:id/plans/:planId/update-payment-method", async (req, res) => {
 
     const plan = await RepaymentPlan.findOne({ _id: req.params.planId, customerId: customer._id });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
+
+    // Prevent duplicate update-method attempts in flight
+    const existingPending = await PaymentAttempt.findOne({ planId: plan._id, status: "pending", attemptNumber: 0 });
+    if (existingPending) return res.status(409).json({ error: "A payment method update is already in progress." });
 
     const email = customer.email ?? "customer@repaystream.local";
     const reference = `rs_updmethod_${plan._id}_${Date.now()}`;

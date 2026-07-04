@@ -25,5 +25,6 @@ const repaymentPlanSchema = new Schema(
 
 repaymentPlanSchema.index({ businessId: 1, idempotencyKey: 1 }, { unique: true, sparse: true });
 repaymentPlanSchema.index({ customerId: 1 });
+repaymentPlanSchema.index({ status: 1 });
 
 export const RepaymentPlan = model("RepaymentPlan", repaymentPlanSchema);

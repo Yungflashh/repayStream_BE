@@ -98,6 +98,19 @@ function overdueEmailHtml(customerName: string, businessName: string, amount: nu
 `);
 }
 
+function planCompletedEmailHtml(customerName: string, businessName: string, totalAmount: number, customerId: string) {
+  return emailWrapper(`
+<p style="margin:0 0 8px;font-size:16px;font-weight:600;color:#16a34a">You're all paid up! 🎉</p>
+<p style="margin:0 0 20px;color:#374151">Hi ${customerName || "there"},</p>
+<p style="margin:0 0 20px;color:#374151">
+  Your repayment plan with <strong>${businessName}</strong> is now <strong>fully settled</strong>.
+  A total of <strong>${fmt(totalAmount)}</strong> has been paid — you have no remaining balance.
+</p>
+<p style="margin:0 0 20px;color:#374151">Thank you for keeping up with your payments. You can view your repayment history any time from your portal.</p>
+<a href="${portalUrl(customerId)}" style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">View your portal</a>
+`);
+}
+
 // ─── Public trigger functions ─────────────────────────────────────────────────
 
 /**
@@ -141,6 +154,47 @@ export async function sendFailedAttemptReminder(attemptId: string | Types.Object
     });
   } catch (err) {
     console.error("[reminder] sendFailedAttemptReminder error:", err);
+  }
+}
+
+/**
+ * Called when a plan transitions to "completed".
+ * Fire-and-forget: callers should use `void sendPlanCompletedNotification(...)`.
+ */
+export async function sendPlanCompletedNotification(planId: string | Types.ObjectId): Promise<void> {
+  try {
+    const plan = await RepaymentPlan.findById(planId).lean();
+    if (!plan) return;
+
+    const [customer, business] = await Promise.all([
+      Customer.findById(plan.customerId).lean(),
+      Business.findById(plan.businessId).lean(),
+    ]);
+    if (!customer) return;
+
+    const customerName = customer.name ?? "";
+    const businessName = business?.name ?? "the business";
+    const totalAmount = plan.totalAmount;
+    const customerId = String(customer._id);
+
+    const smsMessage =
+      `Congratulations ${customerName || "there"}! Your repayment plan with ${businessName} is fully settled (${fmt(totalAmount)}). ` +
+      `No further deductions will be made. - RepayStream`;
+
+    await dispatchReminder({
+      planId: String(plan._id),
+      customerId,
+      reminderKey: `plan_completed:${String(plan._id)}`,
+      type: "pre_due",
+      phone: customer.phone,
+      email: customer.email ?? undefined,
+      smsMessage,
+      emailSubject: `Repayment complete — ${fmt(totalAmount)} to ${businessName}`,
+      emailHtml: planCompletedEmailHtml(customerName, businessName, totalAmount, customerId),
+      meta: { planId: String(plan._id), totalAmount },
+    });
+  } catch (err) {
+    console.error("[reminder] sendPlanCompletedNotification error:", err);
   }
 }
 

@@ -16,5 +16,6 @@ const reminderLogSchema = new Schema(
 );
 
 reminderLogSchema.index({ planId: 1, createdAt: -1 });
+reminderLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 }); // 30-day TTL
 
 export const ReminderLog = model("ReminderLog", reminderLogSchema);

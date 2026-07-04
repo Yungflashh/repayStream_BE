@@ -17,6 +17,7 @@ const disputeThreadSchema = new Schema(
       default: "general",
     },
     resolvedAt: { type: Date },
+    resolutionNote: { type: String, maxlength: 1000, default: null },
   },
   { timestamps: true }
 );

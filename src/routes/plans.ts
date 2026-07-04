@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { randomBytes } from "crypto";
+import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
 import { Business } from "../models/Business.js";
 import { Customer } from "../models/Customer.js";
@@ -6,6 +8,7 @@ import { RepaymentPlan } from "../models/RepaymentPlan.js";
 import { PaymentAttempt } from "../models/PaymentAttempt.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { validatePlanBody } from "../lib/validators/plan.js";
+import { sendEmail } from "../services/notifications/email.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -112,33 +115,103 @@ router.post("/", async (req, res) => {
       }
     }
 
-    // Find or create customer
-    let customer = await Customer.findOne({ businessId: biz._id, email: customerEmail.trim().toLowerCase() });
-    if (!customer) {
-      customer = await Customer.create({
-        name: customerName.trim(),
-        phone: customerPhone.trim(),
-        email: customerEmail.trim().toLowerCase(),
-        businessId: biz._id,
+    // Wrap customer upsert + plan create in a transaction to prevent partial writes
+    const session = await mongoose.startSession();
+    let planId: string;
+    let customerId: string;
+
+    try {
+      await session.withTransaction(async () => {
+        let customer = await Customer.findOne(
+          { businessId: biz._id, email: customerEmail.trim().toLowerCase() },
+          null,
+          { session }
+        );
+        if (!customer) {
+          [customer] = await Customer.create(
+            [
+              {
+                name: customerName.trim(),
+                phone: customerPhone.trim(),
+                email: customerEmail.trim().toLowerCase(),
+                businessId: biz._id,
+              },
+            ],
+            { session }
+          );
+        } else if (customerName?.trim()) {
+          customer.set("name", customerName.trim());
+          await customer.save({ session });
+        }
+
+        const [plan] = await RepaymentPlan.create(
+          [
+            {
+              businessId: biz._id,
+              customerId: customer._id,
+              planName: planName?.trim() || undefined,
+              group: (group as string | undefined)?.trim() || undefined,
+              totalAmount: parseFloat(totalAmount),
+              scheduleJson: schedule,
+              paymentMethod,
+              feeStrategy: feeStrategy === "pass_to_customer" ? "pass_to_customer" : "absorb",
+              idempotencyKey: idempotencyKey || undefined,
+            },
+          ],
+          { session }
+        );
+
+        planId = plan._id.toString();
+        customerId = customer._id.toString();
       });
-    } else if (customerName?.trim()) {
-      customer.set("name", customerName.trim());
-      await customer.save();
+    } finally {
+      await session.endSession();
     }
 
-    const plan = await RepaymentPlan.create({
-      businessId: biz._id,
-      customerId: customer._id,
-      planName: planName?.trim() || undefined,
-      group: (group as string | undefined)?.trim() || undefined,
-      totalAmount: parseFloat(totalAmount),
-      scheduleJson: schedule,
-      paymentMethod,
-      feeStrategy: feeStrategy === "pass_to_customer" ? "pass_to_customer" : "absorb",
-      idempotencyKey: idempotencyKey || undefined,
-    });
+    // Fire-and-forget: send setup email if customer has no User account yet
+    void (async () => {
+      try {
+        const customer = await Customer.findById(customerId!);
+        if (!customer || !customer.email || customer.userId) return; // already has account
+        const token = randomBytes(32).toString("hex");
+        const expiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+        customer.setupToken = token;
+        customer.setupTokenExpiry = expiry;
+        await customer.save();
 
-    res.status(201).json({ plan: { id: plan._id, customerId: customer._id.toString() }, idempotentReplay: false });
+        const appUrl = process.env.APP_URL ?? "http://localhost:5173";
+        const setupUrl = `${appUrl}/set-password?token=${token}`;
+        await sendEmail({
+          to: customer.email,
+          subject: `${biz.name} has created a repayment plan for you`,
+          html: `
+            <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;color:#0f172a">
+              <div style="margin-bottom:28px">
+                <span style="font-size:18px;font-weight:700;letter-spacing:-0.5px">RepayStream</span>
+              </div>
+              <h1 style="font-size:22px;font-weight:700;margin:0 0 8px">You have a new repayment plan</h1>
+              <p style="color:#64748b;font-size:15px;margin:0 0 24px">
+                <strong>${biz.name}</strong> has set up a repayment schedule for you.
+                Set a password to access your portal and view all your plan details.
+              </p>
+              <a href="${setupUrl}" style="display:inline-block;background:#22c55e;color:#fff;text-decoration:none;padding:14px 28px;border-radius:12px;font-weight:600;font-size:15px;margin-bottom:24px">
+                Set my password →
+              </a>
+              <p style="color:#94a3b8;font-size:13px;margin:0 0 8px">This link expires in 7 days.</p>
+              <p style="color:#94a3b8;font-size:13px;margin:0">
+                If you weren't expecting this, you can ignore this email.
+              </p>
+              <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0">
+              <p style="color:#cbd5e1;font-size:12px;margin:0">RepayStream · Secured by Paystack</p>
+            </div>
+          `,
+        });
+      } catch (e) {
+        console.error("[setup-email]", e);
+      }
+    })();
+
+    res.status(201).json({ plan: { id: planId!, customerId: customerId! }, idempotentReplay: false });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create plan" });

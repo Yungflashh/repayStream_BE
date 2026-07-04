@@ -3,7 +3,7 @@ import { PaymentAttempt } from "../models/PaymentAttempt.js";
 import { Customer } from "../models/Customer.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { chargeAuthorization } from "./paystack.js";
-import { sendFailedAttemptReminder } from "../services/reminder.js";
+import { sendFailedAttemptReminder, sendPlanCompletedNotification } from "../services/reminder.js";
 
 
 type ScheduleRow = { amount: number; due_date: string };
@@ -53,9 +53,10 @@ export async function processScheduledPayments() {
       }).lean();
 
       const paidCount = successfulAttempts.length;
+      const totalPaidAmount = successfulAttempts.reduce((sum, a) => sum + a.amount, 0);
 
-      // All installments paid — mark complete
-      if (paidCount >= schedule.length) {
+      // All installments paid OR total amount already collected — mark complete
+      if (paidCount >= schedule.length || totalPaidAmount >= plan.totalAmount) {
         await RepaymentPlan.findByIdAndUpdate(plan._id, { status: "completed" });
         await AuditLog.create({
           actor: "system:scheduler",
@@ -63,6 +64,9 @@ export async function processScheduledPayments() {
           entityType: "repayment_plan",
           entityId: plan._id,
           payload: { totalInstallments: schedule.length, paidCount },
+        });
+        void sendPlanCompletedNotification(plan._id).catch((err: unknown) => {
+          console.error("[scheduler] Failed to send completion notification:", err);
         });
         continue;
       }
@@ -74,13 +78,15 @@ export async function processScheduledPayments() {
       // Only charge if due today or overdue
       if (nextInstallment.due_date > today) continue;
 
-      // Check if there's already a pending attempt for this installment
-      const pendingAttempt = await PaymentAttempt.findOne({
+      // Skip if a fresh pending attempt already exists (prevents double-charging while
+      // Paystack processes asynchronously). Stale pending attempts older than 6 hours
+      // are ignored so a missed webhook never permanently blocks a plan.
+      const recentPending = await PaymentAttempt.findOne({
         planId: plan._id,
         status: "pending",
-        amount: nextInstallment.amount,
+        createdAt: { $gte: new Date(Date.now() - 6 * 60 * 60 * 1000) },
       });
-      if (pendingAttempt) continue;
+      if (recentPending) continue;
 
       // Check failed attempts for this installment (max 3 retries)
       const failedForInstallment = await PaymentAttempt.countDocuments({
