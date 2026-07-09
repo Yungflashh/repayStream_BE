@@ -5,7 +5,7 @@ const paymentAttemptSchema = new Schema(
     planId: { type: Types.ObjectId, ref: "RepaymentPlan", required: true },
     attemptNumber: { type: Number, required: true, min: 0 },
     amount: { type: Number, required: true },
-    status: { type: String, default: "pending" },
+    status: { type: String, enum: ["pending", "success", "failed", "refunded"], default: "pending" },
     idempotencyKey: { type: String, unique: true },
     failureReason: { type: String, default: null },
     provider: { type: String, enum: ["paystack", null], default: null },

@@ -6,6 +6,15 @@ import { processScheduledReminders } from "../services/reminder.js";
 const router = Router();
 router.use(requireAuth);
 
+// All admin routes additionally require the ADMIN_SECRET header to match the env var.
+// This prevents any authenticated business/customer user from triggering privileged ops.
+router.use((req, res, next) => {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret) return res.status(503).json({ error: "Admin endpoint not configured" });
+  if (req.headers["x-admin-secret"] !== secret) return res.status(403).json({ error: "Forbidden" });
+  next();
+});
+
 /** Manually trigger a scheduler sweep — useful in dev/test without waiting an hour. */
 router.post("/run-scheduler", async (_req, res) => {
   try {

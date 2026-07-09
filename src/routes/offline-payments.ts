@@ -27,6 +27,7 @@ router.post("/plans/:planId/record", async (req, res) => {
 
     if (!amount || amount <= 0) return res.status(400).json({ error: "Valid amount required" });
     if (!["cash", "pos", "transfer", "other"].includes(method ?? "")) return res.status(400).json({ error: "Valid method required (cash, pos, transfer, other)" });
+    if (proofUrl && !/^https:\/\//i.test(proofUrl.trim())) return res.status(400).json({ error: "proofUrl must be an https:// URL" });
 
     const op = await OfflinePayment.create({
       planId: plan._id,
@@ -104,13 +105,17 @@ router.post("/:paymentId/approve", async (req, res) => {
     const biz = await Business.findOne({ userId: req.userId });
     if (!biz) return res.status(403).json({ error: "No business" });
 
-    const op = await OfflinePayment.findOne({ _id: req.params.paymentId, businessId: biz._id });
-    if (!op) return res.status(404).json({ error: "Payment not found" });
-    if (op.status !== "pending_approval") return res.status(400).json({ error: "Payment is not pending approval" });
-
-    op.status = "approved";
-    op.approvedAt = new Date();
-    await op.save();
+    // Atomic compare-and-swap: only succeeds if status is still pending_approval,
+    // preventing double-approval race conditions from concurrent requests.
+    const op = await OfflinePayment.findOneAndUpdate(
+      { _id: req.params.paymentId, businessId: biz._id, status: "pending_approval" },
+      { status: "approved", approvedAt: new Date() },
+      { new: true }
+    );
+    if (!op) {
+      const exists = await OfflinePayment.exists({ _id: req.params.paymentId, businessId: biz._id });
+      return res.status(exists ? 400 : 404).json({ error: exists ? "Payment is not pending approval" : "Payment not found" });
+    }
 
     // Create PaymentAttempt to update balance
     const totalAttempts = await PaymentAttempt.countDocuments({ planId: op.planId });
@@ -181,6 +186,7 @@ router.post("/customer/:customerId/plans/:planId/submit", async (req, res) => {
 
     if (!amount || amount <= 0) return res.status(400).json({ error: "Valid amount required" });
     if (!["cash", "pos", "transfer", "other"].includes(method ?? "")) return res.status(400).json({ error: "Valid method required" });
+    if (proofUrl && !/^https:\/\//i.test(proofUrl.trim())) return res.status(400).json({ error: "proofUrl must be an https:// URL" });
 
     const op = await OfflinePayment.create({
       planId: plan._id,

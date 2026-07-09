@@ -8,14 +8,25 @@ import { sendFailedAttemptReminder, sendPlanCompletedNotification } from "../ser
 
 const router = Router();
 
-function scheduleLength(plan: { scheduleJson: unknown; totalAmount: number }): number {
+// Returns true when totalPaidAmount fully covers all installments or the plan total.
+// Uses cumulative amounts (not attempt count) so partial offline payments don't
+// prematurely complete a plan.
+function isFullyPaid(plan: { scheduleJson: unknown; totalAmount: number }, totalPaidAmount: number): boolean {
+  if (totalPaidAmount >= plan.totalAmount) return true;
   const sj = plan.scheduleJson;
-  if (Array.isArray(sj)) return sj.length || 1;
-  if (sj && typeof sj === "object" && !Array.isArray(sj)) {
-    const obj = sj as { type?: string; installments?: unknown[] };
-    if (obj.type === "installments" && Array.isArray(obj.installments)) return obj.installments.length;
+  let schedule: { amount: number }[] = [];
+  if (Array.isArray(sj)) {
+    schedule = sj.filter((r: any) => typeof r.amount === "number").map((r: any) => ({ amount: r.amount }));
+  } else if (sj && typeof sj === "object" && !Array.isArray(sj)) {
+    const obj = sj as { type?: string; installments?: any[]; dueDate?: string };
+    if (obj.type === "installments" && Array.isArray(obj.installments)) {
+      schedule = obj.installments.map((x: any) => ({ amount: parseFloat(String(x.amount ?? 0)) }));
+    }
   }
-  return 1;
+  if (!schedule.length) return false;
+  let rem = totalPaidAmount;
+  for (const row of schedule) { if (rem >= row.amount) { rem -= row.amount; } else { return false; } }
+  return true;
 }
 
 router.post("/paystack", async (req, res) => {
@@ -100,21 +111,23 @@ router.post("/paystack", async (req, res) => {
           });
         }
 
-        // Auto-complete plan when all installments are paid
+        // Recover defaulted plan to active on successful payment
+        if (plan.status === "defaulted") {
+          plan.status = "active";
+        }
+
+        // Auto-complete plan when cumulative paid amount covers the full schedule
         if (plan.status === "active") {
-          const totalInstallments = scheduleLength(plan);
-          const successCount = await PaymentAttempt.countDocuments({
-            planId: plan._id,
-            status: "success",
-          });
-          if (successCount >= totalInstallments) {
+          const successAttempts = await PaymentAttempt.find({ planId: plan._id, status: "success" }).lean();
+          const totalPaidAmount = successAttempts.reduce((sum, a) => sum + a.amount, 0);
+          if (isFullyPaid(plan, totalPaidAmount)) {
             await RepaymentPlan.findByIdAndUpdate(plan._id, { status: "completed" });
             await AuditLog.create({
               actor: "webhook:paystack",
               action: "plan_completed",
               entityType: "repayment_plan",
               entityId: plan._id,
-              payload: { totalInstallments, paidCount: successCount, paymentRef: ref },
+              payload: { totalPaidAmount, paymentRef: ref },
             });
             sendPlanCompletedNotification(plan._id).catch((err: unknown) => {
               console.error("[webhook] Failed to send completion notification:", err);

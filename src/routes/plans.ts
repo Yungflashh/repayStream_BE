@@ -273,6 +273,7 @@ router.post("/:id/notes", async (req, res) => {
 
     const { text } = req.body as { text?: string };
     if (!text?.trim()) return res.status(400).json({ error: "Note text required" });
+    if (text.trim().length > 2000) return res.status(400).json({ error: "Note must be 2000 characters or fewer" });
 
     const plan = await RepaymentPlan.findOne({ _id: req.params.id, businessId: biz._id });
     if (!plan) return res.status(404).json({ error: "Plan not found" });

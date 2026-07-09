@@ -37,6 +37,7 @@ router.post("/paystack", async (req, res) => {
 
     const plan = await RepaymentPlan.findById(planId);
     if (!plan) return res.status(404).json({ error: "Plan not found" });
+    if (plan.status !== "pending_mandate") return res.status(400).json({ error: "This plan is no longer awaiting mandate authorization" });
 
     const customer = await Customer.findById(plan.customerId);
     const email = customer?.email ?? "customer@repaystream.local";

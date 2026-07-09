@@ -154,6 +154,24 @@ function parseScheduleForCustomer(plan: { scheduleJson: unknown; totalAmount: nu
   return [{ amount: plan.totalAmount, due_date: "" }];
 }
 
+// Returns the index of the next unpaid installment based on cumulative paid amounts.
+// This correctly handles partial offline payments (count-based indexing does not).
+async function nextInstallmentIndex(planId: unknown, schedule: { amount: number }[]): Promise<number> {
+  const successAttempts = await PaymentAttempt.find({ planId, status: "success" }).lean();
+  const totalPaid = successAttempts.reduce((s, a) => s + a.amount, 0);
+  let rem = totalPaid;
+  for (let i = 0; i < schedule.length; i++) {
+    if (rem >= schedule[i].amount) { rem -= schedule[i].amount; } else { return i; }
+  }
+  return schedule.length;
+}
+
+// 6-hour window for pending-attempt dedup — matches the scheduler's stale threshold.
+const PENDING_WINDOW_MS = 6 * 60 * 60 * 1000;
+function recentPendingQuery(planId: unknown) {
+  return { planId, status: "pending", createdAt: { $gte: new Date(Date.now() - PENDING_WINDOW_MS) } };
+}
+
 // Retry auto-debit on next overdue installment
 router.post("/:id/plans/:planId/retry-debit", async (req, res) => {
   try {
@@ -167,13 +185,13 @@ router.post("/:id/plans/:planId/retry-debit", async (req, res) => {
     const authCode = (plan as any).authorizationCode as string | undefined;
     if (!authCode) return res.status(400).json({ error: "No payment method on file. Update your payment method first." });
 
-    // Prevent double-charge: reject if a payment is already in progress
-    const existingPending = await PaymentAttempt.findOne({ planId: plan._id, status: "pending" });
+    // Prevent double-charge: reject if a recent payment is already in progress
+    const existingPending = await PaymentAttempt.findOne(recentPendingQuery(plan._id));
     if (existingPending) return res.status(409).json({ error: "A payment is already in progress for this plan." });
 
     const schedule = parseScheduleForCustomer(plan);
-    const successCount = await PaymentAttempt.countDocuments({ planId: plan._id, status: "success" });
-    const nextInstallment = schedule[successCount];
+    const nextIdx = await nextInstallmentIndex(plan._id, schedule);
+    const nextInstallment = schedule[nextIdx];
     if (!nextInstallment) return res.status(400).json({ error: "No installment to retry" });
 
     const email = customer.email ?? "customer@repaystream.local";
@@ -223,13 +241,13 @@ router.post("/:id/plans/:planId/pay-now", async (req, res) => {
     const plan = await RepaymentPlan.findOne({ _id: req.params.planId, customerId: customer._id });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
-    // Prevent duplicate pending attempts
-    const existingPending = await PaymentAttempt.findOne({ planId: plan._id, status: "pending" });
+    // Prevent duplicate pending attempts (within the 6-hour stale window)
+    const existingPending = await PaymentAttempt.findOne(recentPendingQuery(plan._id));
     if (existingPending) return res.status(409).json({ error: "A payment is already in progress for this plan." });
 
     const schedule = parseScheduleForCustomer(plan);
-    const successCount = await PaymentAttempt.countDocuments({ planId: plan._id, status: "success" });
-    const nextInstallment = schedule[successCount];
+    const nextIdx = await nextInstallmentIndex(plan._id, schedule);
+    const nextInstallment = schedule[nextIdx];
     if (!nextInstallment) return res.status(400).json({ error: "All installments are paid" });
 
     const email = customer.email ?? "customer@repaystream.local";
@@ -263,8 +281,8 @@ router.post("/:id/plans/:planId/update-payment-method", async (req, res) => {
     const plan = await RepaymentPlan.findOne({ _id: req.params.planId, customerId: customer._id });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
-    // Prevent duplicate update-method attempts in flight
-    const existingPending = await PaymentAttempt.findOne({ planId: plan._id, status: "pending", attemptNumber: 0 });
+    // Prevent duplicate update-method attempts in flight (within the 6-hour stale window)
+    const existingPending = await PaymentAttempt.findOne({ ...recentPendingQuery(plan._id), attemptNumber: 0 });
     if (existingPending) return res.status(409).json({ error: "A payment method update is already in progress." });
 
     const email = customer.email ?? "customer@repaystream.local";

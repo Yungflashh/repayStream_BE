@@ -23,6 +23,8 @@ router.post("/", async (req, res) => {
     if (!planId || !subject || !message) {
       return res.status(400).json({ error: "planId, subject, and message are required" });
     }
+    if (subject.trim().length > 200) return res.status(400).json({ error: "Subject must be 200 characters or fewer" });
+    if (message.trim().length > 5000) return res.status(400).json({ error: "Message must be 5000 characters or fewer" });
 
     // Determine if sender is customer or business
     const customer = await Customer.findOne({ userId: req.userId });
@@ -36,12 +38,16 @@ router.post("/", async (req, res) => {
       senderType = "customer";
       customerId = customer._id.toString();
       businessId = customer.businessId.toString();
+      // Verify the plan belongs to this customer — prevents disputes on other customers' plans.
+      const { RepaymentPlan } = await import("../models/RepaymentPlan.js");
+      const plan = await RepaymentPlan.findOne({ _id: planId, customerId: customer._id });
+      if (!plan) return res.status(404).json({ error: "Plan not found" });
     } else if (business) {
       senderType = "business";
       businessId = business._id.toString();
-      // Find the customer from the plan
+      // Verify the plan belongs to this business — prevents disputes on other businesses' plans.
       const { RepaymentPlan } = await import("../models/RepaymentPlan.js");
-      const plan = await RepaymentPlan.findById(planId);
+      const plan = await RepaymentPlan.findOne({ _id: planId, businessId: business._id });
       if (!plan) return res.status(404).json({ error: "Plan not found" });
       customerId = plan.customerId.toString();
     } else {
@@ -171,6 +177,7 @@ router.post("/:threadId/messages", async (req, res) => {
   try {
     const { body: messageBody } = req.body as { body?: string };
     if (!messageBody?.trim()) return res.status(400).json({ error: "Message body required" });
+    if (messageBody.trim().length > 5000) return res.status(400).json({ error: "Message must be 5000 characters or fewer" });
 
     const thread = await DisputeThread.findById(req.params.threadId);
     if (!thread) return res.status(404).json({ error: "Thread not found" });

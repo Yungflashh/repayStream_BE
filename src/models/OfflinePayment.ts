@@ -4,7 +4,7 @@ const offlinePaymentSchema = new Schema(
   {
     planId: { type: Types.ObjectId, ref: "RepaymentPlan", required: true },
     businessId: { type: Types.ObjectId, ref: "Business", required: true },
-    amount: { type: Number, required: true },
+    amount: { type: Number, required: true, min: 0.01 },
     method: { type: String, enum: ["cash", "pos", "transfer", "other"], required: true },
     notes: { type: String, trim: true },
     proofUrl: { type: String, trim: true },

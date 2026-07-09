@@ -219,12 +219,17 @@ export async function processScheduledReminders(): Promise<void> {
     try {
       const schedule = parseSchedule(plan);
 
-      const successfulAttempts = await PaymentAttempt.countDocuments({
-        planId: plan._id,
-        status: "success",
-      });
+      // Use cumulative amount to find next installment — count-based indexing
+      // breaks when partial offline payments create extra PaymentAttempt records.
+      const successAttempts = await PaymentAttempt.find({ planId: plan._id, status: "success" }).lean();
+      const totalPaid = successAttempts.reduce((s, a) => s + a.amount, 0);
+      let rem = totalPaid;
+      let nextInstallmentIdx = schedule.length;
+      for (let i = 0; i < schedule.length; i++) {
+        if (rem >= schedule[i].amount) { rem -= schedule[i].amount; } else { nextInstallmentIdx = i; break; }
+      }
 
-      const nextInstallment = schedule[successfulAttempts];
+      const nextInstallment = schedule[nextInstallmentIdx];
       if (!nextInstallment || !nextInstallment.due_date) continue;
 
       const [customer, business] = await Promise.all([
@@ -238,7 +243,7 @@ export async function processScheduledReminders(): Promise<void> {
       const { amount, due_date } = nextInstallment;
       const customerId = String(customer._id);
       const planId = String(plan._id);
-      const installmentIdx = successfulAttempts;
+      const installmentIdx = nextInstallmentIdx;
 
       // ── Pre-due (T-1): due tomorrow ──────────────────────────────────────
       if (due_date === tomorrowStr) {

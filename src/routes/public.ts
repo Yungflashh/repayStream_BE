@@ -29,7 +29,7 @@ router.get("/plans/:id", async (req, res) => {
         payment_method: plan.paymentMethod,
         customer_id: plan.customerId.toString(),
         customers: customer
-          ? { name: (customer as { name?: string }).name ?? null, phone: customer.phone, email: customer.email }
+          ? { name: (customer as { name?: string }).name ?? null }
           : null,
       },
     });
@@ -50,7 +50,8 @@ router.get("/plans/:id/verify", async (req, res) => {
       return res.json({ planStatus: plan.status, paymentStatus: "no_ref" });
     }
 
-    const attempt = await PaymentAttempt.findOne({ externalRef: ref });
+    // Scope by planId to prevent leaking payment status across unrelated plans.
+    const attempt = await PaymentAttempt.findOne({ externalRef: ref, planId: plan._id });
     if (!attempt) {
       return res.json({ planStatus: plan.status, paymentStatus: "not_found" });
     }

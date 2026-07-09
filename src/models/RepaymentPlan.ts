@@ -8,7 +8,7 @@ const repaymentPlanSchema = new Schema(
     group: { type: String, trim: true },
     totalAmount: { type: Number, required: true },
     scheduleJson: { type: Schema.Types.Mixed, required: true },
-    status: { type: String, default: "pending_mandate" },
+    status: { type: String, enum: ["pending_mandate", "active", "completed", "defaulted", "paused", "cancelled"], default: "pending_mandate" },
     idempotencyKey: { type: String },
     paymentMethod: { type: String, enum: ["card"], default: "card" },
     authorizationCode: { type: String },

@@ -127,14 +127,18 @@ router.post("/setup-password", async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Find or create the User account
+    // Find or create the User account.
+    // IMPORTANT: if a User already exists for this email (from another business),
+    // do NOT overwrite their password — that would lock them out of their other account.
+    // Only set the password when creating a brand-new account.
     let user = await User.findOne({ email: customer.email.toLowerCase() });
     if (!user) {
       user = await User.create({ email: customer.email.toLowerCase(), passwordHash });
-    } else {
-      // Account already exists — update password so they can log in
-      user.passwordHash = passwordHash;
-      await user.save();
+    }
+    // If user already exists and this customer is already linked to a different user,
+    // the email mismatch is a config issue — reject rather than silently takeover.
+    if (customer.userId && String(customer.userId) !== String(user._id)) {
+      return res.status(409).json({ error: "This customer account is already linked to a different user" });
     }
 
     // Link customer to user and clear the token

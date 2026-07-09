@@ -25,7 +25,9 @@ import analyticsRoutes from "./routes/analytics.js";
 import { requireAuth } from "./middleware/auth.js";
 
 // ── Startup env validation ────────────────────────────────────────────────────
-const REQUIRED_IN_PROD = ["JWT_SECRET", "MONGODB_URI", "PAYSTACK_SECRET_KEY", "PAYSTACK_WEBHOOK_SECRET"];
+// PAYSTACK_WEBHOOK_SECRET is intentionally omitted — Paystack signs webhooks with
+// PAYSTACK_SECRET_KEY (same key used for API calls, per Paystack docs).
+const REQUIRED_IN_PROD = ["JWT_SECRET", "MONGODB_URI", "PAYSTACK_SECRET_KEY"];
 if (process.env.NODE_ENV === "production") {
   const missing = REQUIRED_IN_PROD.filter((k) => !process.env[k]);
   if (missing.length) {
@@ -71,13 +73,22 @@ app.use(
 
 app.use(express.json());
 
-// ── Rate limiting for unauthenticated routes ──────────────────────────────────
+// ── Rate limiting ─────────────────────────────────────────────────────────────
 const publicLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please try again later." },
+});
+
+// Strict limiter for auth routes — prevents brute-force password attacks.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many auth attempts, please try again later." },
 });
 
 // ── Health check with real DB ping ───────────────────────────────────────────
@@ -91,7 +102,7 @@ app.get("/health", async (_req, res) => {
 });
 
 // ── API routes ────────────────────────────────────────────────────────────────
-app.use("/api/auth", authRoutes);
+app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/business", businessRoutes);
 app.use("/api/plans", planRoutes);
 app.use("/api/mandate", publicLimiter, mandateRoutes);

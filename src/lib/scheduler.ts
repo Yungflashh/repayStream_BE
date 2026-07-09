@@ -52,18 +52,25 @@ export async function processScheduledPayments() {
         status: "success",
       }).lean();
 
-      const paidCount = successfulAttempts.length;
       const totalPaidAmount = successfulAttempts.reduce((sum, a) => sum + a.amount, 0);
 
-      // All installments paid OR total amount already collected — mark complete
-      if (paidCount >= schedule.length || totalPaidAmount >= plan.totalAmount) {
+      // Determine next unpaid installment using cumulative amounts (handles partial offline payments)
+      let cumulative = 0;
+      let nextInstallmentIdx = schedule.length;
+      for (let i = 0; i < schedule.length; i++) {
+        cumulative += schedule[i].amount;
+        if (totalPaidAmount < cumulative) { nextInstallmentIdx = i; break; }
+      }
+
+      // Mark complete only when total collected covers the full plan
+      if (nextInstallmentIdx >= schedule.length || totalPaidAmount >= plan.totalAmount) {
         await RepaymentPlan.findByIdAndUpdate(plan._id, { status: "completed" });
         await AuditLog.create({
           actor: "system:scheduler",
           action: "plan_completed",
           entityType: "repayment_plan",
           entityId: plan._id,
-          payload: { totalInstallments: schedule.length, paidCount },
+          payload: { totalInstallments: schedule.length, totalPaidAmount },
         });
         void sendPlanCompletedNotification(plan._id).catch((err: unknown) => {
           console.error("[scheduler] Failed to send completion notification:", err);
@@ -72,7 +79,7 @@ export async function processScheduledPayments() {
       }
 
       // Get next installment
-      const nextInstallment = schedule[paidCount];
+      const nextInstallment = schedule[nextInstallmentIdx];
       if (!nextInstallment || !nextInstallment.due_date) continue;
 
       // Only charge if due today or overdue
@@ -102,7 +109,7 @@ export async function processScheduledPayments() {
           action: "plan_defaulted",
           entityType: "repayment_plan",
           entityId: plan._id,
-          payload: { installmentIndex: paidCount, failedAttempts: failedForInstallment },
+          payload: { installmentIndex: nextInstallmentIdx, failedAttempts: failedForInstallment },
         });
         continue;
       }
@@ -115,7 +122,7 @@ export async function processScheduledPayments() {
           action: "installment_skipped",
           entityType: "repayment_plan",
           entityId: plan._id,
-          payload: { reason: "no_authorization_code", installmentIndex: paidCount + 1 },
+          payload: { reason: "no_authorization_code", installmentIndex: nextInstallmentIdx + 1 },
         });
         continue;
       }
@@ -124,7 +131,7 @@ export async function processScheduledPayments() {
       const customer = await Customer.findById(plan.customerId);
       const email = customer?.email ?? "customer@repaystream.local";
       const amount = nextInstallment.amount;
-      const reference = `rs_${plan._id}_inst${paidCount + 1}_${Date.now()}`;
+      const reference = `rs_${plan._id}_inst${nextInstallmentIdx + 1}_${Date.now()}`;
       const amountKobo = Math.max(Math.round(amount * 100), 200);
 
       const attempt = await PaymentAttempt.create({
@@ -156,10 +163,10 @@ export async function processScheduledPayments() {
         action: "installment_charged",
         entityType: "repayment_plan",
         entityId: plan._id,
-        payload: { installmentIndex: paidCount + 1, amount, provider: "paystack", reference, chargeStatus: result.status },
+        payload: { installmentIndex: nextInstallmentIdx + 1, amount, provider: "paystack", reference, chargeStatus: result.status },
       });
 
-      console.log(`[scheduler] Charged installment ${paidCount + 1} for plan ${plan._id} — ₦${amount} — ${result.status}`);
+      console.log(`[scheduler] Charged installment ${nextInstallmentIdx + 1} for plan ${plan._id} — ₦${amount} — ${result.status}`);
     } catch (err) {
       console.error(`[scheduler] Error processing plan ${plan._id}:`, err);
     }
