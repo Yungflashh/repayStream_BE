@@ -233,7 +233,7 @@ router.patch("/:id/status", async (req, res) => {
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
     const prev = plan.status;
-    let next: string;
+    let next: "pending_mandate" | "active" | "completed" | "defaulted" | "paused" | "cancelled";
     if (action === "pause") {
       if (plan.status !== "active") return res.status(400).json({ error: "Only active plans can be paused" });
       next = "paused";
