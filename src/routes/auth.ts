@@ -5,6 +5,7 @@ import { User } from "../models/User.js";
 import { Customer } from "../models/Customer.js";
 import { signToken } from "../auth/jwt.js";
 import { requireAuth } from "../middleware/auth.js";
+import { sendEmail } from "../services/notifications/email.js";
 
 const router = Router();
 
@@ -154,6 +155,118 @@ router.post("/setup-password", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to set password" });
+  }
+});
+
+// ── Forgot / reset password ────────────────────────────────────────────────────
+
+// Step 1: request a reset link
+router.post("/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body as { email?: string };
+    if (!email) return res.status(400).json({ error: "Email is required" });
+
+    // Always respond with the same message to prevent email enumeration
+    const ok = { ok: true, message: "If that email exists, a reset link has been sent." };
+
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user) return res.json(ok);
+
+    const token = randomBytes(32).toString("hex");
+    const expiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    (user as any).resetToken = token;
+    (user as any).resetTokenExpiry = expiry;
+    await user.save();
+
+    const appUrl = process.env.APP_URL ?? process.env.CLIENT_ORIGIN?.split(",")[0] ?? "http://localhost:5173";
+    const resetUrl = `${appUrl}/reset-password?token=${token}`;
+
+    await sendEmail({
+      to: user.email,
+      subject: "Reset your RepayStream password",
+      html: `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 16px">
+<table width="520" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;max-width:100%">
+<tr><td style="background:#0f172a;padding:20px 32px">
+  <span style="color:#fff;font-size:18px;font-weight:700">RepayStream</span>
+</td></tr>
+<tr><td style="padding:32px">
+  <p style="margin:0 0 8px;font-size:16px;font-weight:600;color:#0f172a">Reset your password</p>
+  <p style="margin:0 0 20px;color:#374151;font-size:15px">
+    We received a request to reset your password. Click the button below — this link expires in <strong>1 hour</strong>.
+  </p>
+  <a href="${resetUrl}" style="display:inline-block;background:#22c55e;color:#fff;text-decoration:none;padding:14px 28px;border-radius:12px;font-weight:600;font-size:15px;margin-bottom:24px">
+    Reset my password →
+  </a>
+  <p style="color:#94a3b8;font-size:13px;margin:0 0 8px">If you didn't request this, you can safely ignore this email.</p>
+  <p style="color:#94a3b8;font-size:12px;margin:0;word-break:break-all">Or copy this link: ${resetUrl}</p>
+</td></tr>
+<tr><td style="background:#f4f4f5;padding:16px 32px;font-size:12px;color:#6b7280;text-align:center">
+  RepayStream &mdash; Automated Repayment Management
+</td></tr>
+</table></td></tr></table>
+</body></html>`,
+    });
+
+    res.json(ok);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to process request" });
+  }
+});
+
+// Step 2: validate the reset token (used by the UI to show the form vs. invalid state)
+router.get("/reset-info", async (req, res) => {
+  try {
+    const token = req.query.token as string | undefined;
+    if (!token) return res.status(400).json({ valid: false, error: "Token required" });
+
+    const user = await User.findOne({ resetToken: token });
+    if (!user || !(user as any).resetToken) {
+      return res.status(404).json({ valid: false, error: "Invalid or expired link" });
+    }
+    const expiry = (user as any).resetTokenExpiry as Date | null;
+    if (!expiry || expiry < new Date()) {
+      return res.status(410).json({ valid: false, error: "This link has expired. Please request a new one." });
+    }
+
+    res.json({ valid: true, email: user.email });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ valid: false, error: "Failed" });
+  }
+});
+
+// Step 3: consume the token and set the new password
+router.post("/reset-password", async (req, res) => {
+  try {
+    const { token, password } = req.body as { token?: string; password?: string };
+    if (!token || !password) return res.status(400).json({ error: "Token and password are required" });
+    if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
+
+    const user = await User.findOne({ resetToken: token });
+    if (!user || !(user as any).resetToken) {
+      return res.status(404).json({ error: "Invalid or expired link" });
+    }
+    const expiry = (user as any).resetTokenExpiry as Date | null;
+    if (!expiry || expiry < new Date()) {
+      return res.status(410).json({ error: "This link has expired. Please request a new one." });
+    }
+
+    user.passwordHash = await bcrypt.hash(password, 10);
+    (user as any).resetToken = null;
+    (user as any).resetTokenExpiry = null;
+    await user.save();
+
+    // Sign them in immediately
+    const jwtToken = signToken(user._id.toHexString());
+    res.cookie("token", jwtToken, cookieOptions);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to reset password" });
   }
 });
 
