@@ -3,7 +3,7 @@ import { randomBytes } from "crypto";
 import bcrypt from "bcryptjs";
 import { User } from "../models/User.js";
 import { Customer } from "../models/Customer.js";
-import { signToken } from "../auth/jwt.js";
+import { signToken, verifyToken } from "../auth/jwt.js";
 import { requireAuth } from "../middleware/auth.js";
 import { sendEmail } from "../services/notifications/email.js";
 
@@ -59,7 +59,10 @@ router.post("/login", async (req, res) => {
 });
 
 router.post("/logout", (_req, res) => {
-  res.clearCookie("token", cookieOptions).json({ ok: true });
+  // Omit maxAge — passing it to clearCookie causes Max-Age to override Expires,
+  // leaving the cookie alive (just empty) instead of deleting it.
+  const { maxAge: _discard, ...clearOptions } = cookieOptions;
+  res.clearCookie("token", clearOptions).json({ ok: true });
 });
 
 router.get("/me", requireAuth, async (req, res) => {
@@ -148,10 +151,19 @@ router.post("/setup-password", async (req, res) => {
     customer.setupTokenExpiry = null;
     await customer.save();
 
-    // Sign them in immediately
-    const jwtToken = signToken(user._id.toHexString());
-    res.cookie("token", jwtToken, cookieOptions);
-    res.json({ ok: true, customerId: customer._id.toString() });
+    // Only issue a new session if the requester isn't already logged in as a
+    // different user. This prevents overwriting a business owner's cookie when
+    // they open a customer setup link in their own browser.
+    const existingToken = req.cookies?.token as string | undefined;
+    const existingPayload = existingToken ? verifyToken(existingToken) : null;
+    const isCorrectUser = existingPayload?.sub === user._id.toHexString();
+
+    const sessionSet = !existingPayload || isCorrectUser;
+    if (sessionSet) {
+      res.cookie("token", signToken(user._id.toHexString()), cookieOptions);
+    }
+
+    res.json({ ok: true, customerId: customer._id.toString(), sessionSet });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to set password" });
