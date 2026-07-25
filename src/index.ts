@@ -40,6 +40,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = parseInt(process.env.PORT ?? "4000", 10);
 
+// Trust the first hop from the reverse proxy so req.ip reflects the real client IP.
+// Required for rate limiting to work correctly in production (Render, Railway, etc.).
+app.set("trust proxy", 1);
+
 // ── CORS ──────────────────────────────────────────────────────────────────────
 console.log("[cors] CLIENT_ORIGIN =", process.env.CLIENT_ORIGIN);
 const allowedOrigins = (process.env.CLIENT_ORIGIN ?? "http://localhost:5173")
@@ -102,7 +106,14 @@ app.get("/health", async (_req, res) => {
 });
 
 // ── API routes ────────────────────────────────────────────────────────────────
-app.use("/api/auth", authLimiter, authRoutes);
+// Rate-limit only the write/sensitive auth routes that are brute-force targets.
+// /api/auth/me is a read-only session check hit on every page load — do NOT limit it.
+app.use("/api/auth/login", authLimiter);
+app.use("/api/auth/register", authLimiter);
+app.use("/api/auth/forgot-password", authLimiter);
+app.use("/api/auth/reset-password", authLimiter);
+app.use("/api/auth/setup-password", authLimiter);
+app.use("/api/auth", authRoutes);
 app.use("/api/business", businessRoutes);
 app.use("/api/plans", planRoutes);
 app.use("/api/mandate", publicLimiter, mandateRoutes);
