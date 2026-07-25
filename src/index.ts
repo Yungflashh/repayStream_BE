@@ -4,8 +4,6 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { pinoHttp } from "pino-http";
 import type { IncomingMessage, ServerResponse } from "http";
-import path from "path";
-import { fileURLToPath } from "url";
 import mongoose from "mongoose";
 import rateLimit from "express-rate-limit";
 
@@ -39,7 +37,6 @@ if (process.env.NODE_ENV === "production") {
   }
 }
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = parseInt(process.env.PORT ?? "4000", 10);
 
@@ -154,12 +151,8 @@ app.use("/api/offline", offlinePaymentRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/analytics", requireAuth, analyticsRoutes);
 
-// ── Serve client in production ────────────────────────────────────────────────
-const clientDist = path.resolve(__dirname, "../../client/dist");
-app.use(express.static(clientDist));
-app.get("*", (_req, res) => {
-  res.sendFile(path.join(clientDist, "index.html"));
-});
+// Client is served from Vercel — this server is API-only.
+app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 
 // ── Global error handler ──────────────────────────────────────────────────────
 // Catches any error passed via next(err) or thrown in async routes.
