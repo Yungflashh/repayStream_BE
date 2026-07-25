@@ -23,7 +23,12 @@
     "express-rate-limit": "^8.5.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.5",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
+  },
+  "devDependencies": {
+    "pino-pretty": "^13.1.3"
   }
 }

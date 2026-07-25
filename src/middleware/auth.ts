@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { verifyToken } from "../auth/jwt.js";
+import logger from "../lib/logger.js";
 
 declare global {
   namespace Express {
@@ -17,9 +18,15 @@ function extractToken(req: Request): string | undefined {
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const token = extractToken(req);
-  if (!token) return res.status(401).json({ error: "Not authenticated" });
+  if (!token) {
+    logger.warn({ method: req.method, path: req.path, ip: req.ip }, "auth rejected — no token");
+    return res.status(401).json({ error: "Not authenticated" });
+  }
   const payload = verifyToken(token);
-  if (!payload) return res.status(401).json({ error: "Invalid token" });
+  if (!payload) {
+    logger.warn({ method: req.method, path: req.path, ip: req.ip }, "auth rejected — invalid token");
+    return res.status(401).json({ error: "Invalid token" });
+  }
   req.userId = payload.sub;
   next();
 }

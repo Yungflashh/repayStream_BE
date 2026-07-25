@@ -6,6 +6,7 @@ import { Customer } from "../models/Customer.js";
 import { signToken, verifyToken } from "../auth/jwt.js";
 import { requireAuth } from "../middleware/auth.js";
 import { sendEmail } from "../services/notifications/email.js";
+import logger from "../lib/logger.js";
 
 const router = Router();
 
@@ -24,44 +25,56 @@ router.post("/register", async (req, res) => {
       return res.status(400).json({ error: "Email and password (min 8 chars) required" });
 
     const exists = await User.findOne({ email: email.trim().toLowerCase() });
-    if (exists) return res.status(409).json({ error: "Email already registered" });
+    if (exists) {
+      logger.warn({ email }, "registration attempt with already-registered email");
+      return res.status(409).json({ error: "Email already registered" });
+    }
 
     const passwordHash = await bcrypt.hash(password, 10);
     const user = await User.create({ email: email.trim().toLowerCase(), passwordHash });
     const token = signToken(user._id.toHexString());
 
+    logger.info({ userId: user._id, email: user.email }, "user registered");
     res.cookie("token", token, cookieOptions);
     res.status(201).json({ user: { id: user._id, email: user.email }, token });
   } catch (err) {
-    console.error(err);
+    logger.error({ err }, "registration failed");
     res.status(500).json({ error: "Registration failed" });
   }
 });
 
 router.post("/login", async (req, res) => {
+  const { email, password } = req.body as { email?: string; password?: string };
   try {
-    const { email, password } = req.body as { email?: string; password?: string };
     if (!email || !password) return res.status(400).json({ error: "Email and password required" });
 
     const user = await User.findOne({ email: email.trim().toLowerCase() });
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+    if (!user) {
+      logger.warn({ email }, "login failed — email not found");
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
     const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) return res.status(401).json({ error: "Invalid credentials" });
+    if (!valid) {
+      logger.warn({ email, userId: user._id }, "login failed — wrong password");
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
     const token = signToken(user._id.toHexString());
+    logger.info({ userId: user._id, email: user.email }, "user logged in");
     res.cookie("token", token, cookieOptions);
     res.json({ user: { id: user._id, email: user.email }, token });
   } catch (err) {
-    console.error(err);
+    logger.error({ err, email }, "login error");
     res.status(500).json({ error: "Login failed" });
   }
 });
 
-router.post("/logout", (_req, res) => {
+router.post("/logout", (req, res) => {
   // Omit maxAge — passing it to clearCookie causes Max-Age to override Expires,
   // leaving the cookie alive (just empty) instead of deleting it.
   const { maxAge: _discard, ...clearOptions } = cookieOptions;
+  logger.info({ ip: req.ip }, "user logged out");
   res.clearCookie("token", clearOptions).json({ ok: true });
 });
 
@@ -182,7 +195,10 @@ router.post("/forgot-password", async (req, res) => {
     const ok = { ok: true, message: "If that email exists, a reset link has been sent." };
 
     const user = await User.findOne({ email: email.trim().toLowerCase() });
-    if (!user) return res.json(ok);
+    if (!user) {
+      logger.info({ email }, "password reset requested for unknown email");
+      return res.json(ok);
+    }
 
     const token = randomBytes(32).toString("hex");
     const expiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
@@ -194,6 +210,7 @@ router.post("/forgot-password", async (req, res) => {
     const appUrl = process.env.APP_URL ?? process.env.CLIENT_ORIGIN?.split(",")[0] ?? "http://localhost:5173";
     const resetUrl = `${appUrl}/reset-password?token=${token}`;
 
+    logger.info({ userId: user._id, email: user.email }, "password reset email sent");
     await sendEmail({
       to: user.email,
       subject: "Reset your RepayStream password",
@@ -224,7 +241,7 @@ router.post("/forgot-password", async (req, res) => {
 
     res.json(ok);
   } catch (err) {
-    console.error(err);
+    logger.error({ err }, "forgot-password error");
     res.status(500).json({ error: "Failed to process request" });
   }
 });
@@ -272,12 +289,12 @@ router.post("/reset-password", async (req, res) => {
     (user as any).resetTokenExpiry = null;
     await user.save();
 
-    // Sign them in immediately
+    logger.info({ userId: user._id, email: user.email }, "password reset complete");
     const jwtToken = signToken(user._id.toHexString());
     res.cookie("token", jwtToken, cookieOptions);
     res.json({ ok: true });
   } catch (err) {
-    console.error(err);
+    logger.error({ err }, "reset-password error");
     res.status(500).json({ error: "Failed to reset password" });
   }
 });

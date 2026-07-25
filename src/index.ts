@@ -1,12 +1,15 @@
 import "dotenv/config";
-import express from "express";
+import express, { type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import { pinoHttp } from "pino-http";
+import type { IncomingMessage, ServerResponse } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import mongoose from "mongoose";
 import rateLimit from "express-rate-limit";
 
+import logger from "./lib/logger.js";
 import { connectDB } from "./db.js";
 import { startScheduler, stopScheduler } from "./lib/scheduler.js";
 import { startReminderScheduler, stopReminderScheduler } from "./lib/reminder-scheduler.js";
@@ -31,7 +34,7 @@ const REQUIRED_IN_PROD = ["JWT_SECRET", "MONGODB_URI", "PAYSTACK_SECRET_KEY"];
 if (process.env.NODE_ENV === "production") {
   const missing = REQUIRED_IN_PROD.filter((k) => !process.env[k]);
   if (missing.length) {
-    console.error(`[startup] Missing required env vars: ${missing.join(", ")}`);
+    logger.fatal({ missing }, "Missing required env vars — aborting startup");
     process.exit(1);
   }
 }
@@ -44,8 +47,26 @@ const PORT = parseInt(process.env.PORT ?? "4000", 10);
 // Required for rate limiting to work correctly in production (Render, Railway, etc.).
 app.set("trust proxy", 1);
 
+// ── HTTP request/response logging ────────────────────────────────────────────
+app.use(
+  pinoHttp({
+    logger,
+    // Skip logging for health checks — too noisy
+    autoLogging: { ignore: (req: IncomingMessage) => req.url === "/health" },
+    customLogLevel: (_req: IncomingMessage, res: ServerResponse) => {
+      if (res.statusCode >= 500) return "error";
+      if (res.statusCode >= 400) return "warn";
+      return "info";
+    },
+    customSuccessMessage: (req: IncomingMessage, res: ServerResponse) =>
+      `${req.method} ${req.url} ${res.statusCode}`,
+    customErrorMessage: (req: IncomingMessage, res: ServerResponse) =>
+      `${req.method} ${req.url} ${res.statusCode}`,
+  })
+);
+
 // ── CORS ──────────────────────────────────────────────────────────────────────
-console.log("[cors] CLIENT_ORIGIN =", process.env.CLIENT_ORIGIN);
+logger.info({ allowedOrigins: process.env.CLIENT_ORIGIN }, "CORS config");
 const allowedOrigins = (process.env.CLIENT_ORIGIN ?? "http://localhost:5173")
   .split(",")
   .map((o) => o.trim());
@@ -55,6 +76,7 @@ app.use(
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
+        logger.warn({ origin }, "CORS blocked request from disallowed origin");
         callback(new Error(`CORS: origin ${origin} not allowed`));
       }
     },
@@ -83,16 +105,22 @@ const publicLimiter = rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many requests, please try again later." },
+  handler: (req, res) => {
+    logger.warn({ ip: req.ip, path: req.path }, "public rate limit exceeded");
+    res.status(429).json({ error: "Too many requests, please try again later." });
+  },
 });
 
-// Strict limiter for auth routes — prevents brute-force password attacks.
+// Strict limiter for write auth routes — prevents brute-force password attacks.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many auth attempts, please try again later." },
+  handler: (req, res) => {
+    logger.warn({ ip: req.ip, path: req.path }, "auth rate limit exceeded");
+    res.status(429).json({ error: "Too many auth attempts, please try again later." });
+  },
 });
 
 // ── Health check with real DB ping ───────────────────────────────────────────
@@ -133,6 +161,13 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(clientDist, "index.html"));
 });
 
+// ── Global error handler ──────────────────────────────────────────────────────
+// Catches any error passed via next(err) or thrown in async routes.
+app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
+  logger.error({ err, method: req.method, path: req.path }, "unhandled error");
+  res.status(500).json({ error: "Internal server error" });
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 async function start() {
   await connectDB();
@@ -145,26 +180,24 @@ async function start() {
   startReminderScheduler();
 
   const server = app.listen(PORT, () => {
-    console.log(`[server] running on http://localhost:${PORT}`);
+    logger.info({ port: PORT }, "server started");
   });
 
-  // Graceful shutdown
   function shutdown(signal: string) {
-    console.log(`[server] ${signal} received — shutting down gracefully`);
+    logger.info({ signal }, "graceful shutdown initiated");
     stopScheduler();
     stopReminderScheduler();
     server.close(() => {
       mongoose.connection
         .close()
         .then(() => {
-          console.log("[server] graceful shutdown complete");
+          logger.info("graceful shutdown complete");
           process.exit(0);
         })
         .catch(() => process.exit(1));
     });
-    // Force exit after 10 seconds if graceful shutdown stalls
     setTimeout(() => {
-      console.error("[server] forced exit after timeout");
+      logger.error("forced exit after shutdown timeout");
       process.exit(1);
     }, 10_000).unref();
   }
@@ -173,4 +206,4 @@ async function start() {
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-start().catch(console.error);
+start().catch((err) => logger.fatal({ err }, "startup failed"));
