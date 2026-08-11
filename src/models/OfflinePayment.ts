@@ -12,6 +12,10 @@ const offlinePaymentSchema = new Schema(
     recordedBy: { type: String, enum: ["business", "customer"], required: true },
     recordedByUserId: { type: Types.ObjectId, ref: "User" },
     approvedAt: { type: Date },
+    approvedByUserId: { type: Types.ObjectId, ref: "User" },
+    rejectedAt: { type: Date },
+    rejectedByUserId: { type: Types.ObjectId, ref: "User" },
+    rejectionReason: { type: String, trim: true },
   },
   { timestamps: true }
 );

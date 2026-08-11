@@ -4,34 +4,8 @@ import { Customer } from "../models/Customer.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { chargeAuthorization } from "./paystack.js";
 import { sendFailedAttemptReminder, sendPlanCompletedNotification } from "../services/reminder.js";
+import { parseSchedule, computeNextInstallment } from "./utils/schedule.js";
 
-
-type ScheduleRow = { amount: number; due_date: string };
-
-function parseSchedule(plan: { scheduleJson: unknown; totalAmount: number }): ScheduleRow[] {
-  const sj = plan.scheduleJson;
-
-  if (Array.isArray(sj) && sj.length > 0) {
-    return sj
-      .filter((r: any) => typeof r.amount === "number" && typeof r.due_date === "string")
-      .map((r: any) => ({ amount: r.amount, due_date: r.due_date }));
-  }
-
-  if (sj && typeof sj === "object" && !Array.isArray(sj)) {
-    const obj = sj as { type?: string; installments?: any[]; dueDate?: string };
-    if (obj.type === "installments" && Array.isArray(obj.installments)) {
-      return obj.installments.map((x: any) => ({
-        amount: parseFloat(String(x.amount ?? 0)),
-        due_date: String(x.dueDate ?? ""),
-      }));
-    }
-    if (obj.type === "lump_sum" && obj.dueDate) {
-      return [{ amount: plan.totalAmount, due_date: obj.dueDate }];
-    }
-  }
-
-  return [{ amount: plan.totalAmount, due_date: "" }];
-}
 
 /**
  * Check all active plans for due installments and initiate charges.
@@ -54,16 +28,12 @@ export async function processScheduledPayments() {
 
       const totalPaidAmount = successfulAttempts.reduce((sum, a) => sum + a.amount, 0);
 
-      // Determine next unpaid installment using cumulative amounts (handles partial offline payments)
-      let cumulative = 0;
-      let nextInstallmentIdx = schedule.length;
-      for (let i = 0; i < schedule.length; i++) {
-        cumulative += schedule[i].amount;
-        if (totalPaidAmount < cumulative) { nextInstallmentIdx = i; break; }
-      }
+      // Compute next unpaid installment + how much of it is still owed
+      // (partial offline payments already reduce dueAmount).
+      const next = computeNextInstallment(schedule, totalPaidAmount);
 
       // Mark complete only when total collected covers the full plan
-      if (nextInstallmentIdx >= schedule.length || totalPaidAmount >= plan.totalAmount) {
+      if (next.isComplete || totalPaidAmount >= plan.totalAmount) {
         await RepaymentPlan.findByIdAndUpdate(plan._id, { status: "completed" });
         await AuditLog.create({
           actor: "system:scheduler",
@@ -79,11 +49,16 @@ export async function processScheduledPayments() {
       }
 
       // Get next installment
-      const nextInstallment = schedule[nextInstallmentIdx];
+      const nextInstallment = next.row;
       if (!nextInstallment || !nextInstallment.due_date) continue;
 
       // Only charge if due today or overdue
       if (nextInstallment.due_date > today) continue;
+
+      // The remaining owed on this installment — critical: without this, a
+      // partial offline payment would still get charged the full installment.
+      const chargeAmount = next.dueAmount;
+      if (chargeAmount <= 0) continue;
 
       // Skip if a fresh pending attempt already exists (prevents double-charging while
       // Paystack processes asynchronously). Stale pending attempts older than 6 hours
@@ -95,11 +70,12 @@ export async function processScheduledPayments() {
       });
       if (recentPending) continue;
 
-      // Check failed attempts for this installment (max 3 retries)
+      // Check failed attempts for this installment (max 3 retries).
+      // Match on the remaining (chargeAmount) since that's what we'd try again.
       const failedForInstallment = await PaymentAttempt.countDocuments({
         planId: plan._id,
         status: "failed",
-        amount: nextInstallment.amount,
+        amount: chargeAmount,
       });
       if (failedForInstallment >= 3) {
         // Max retries exceeded — mark defaulted
@@ -109,7 +85,7 @@ export async function processScheduledPayments() {
           action: "plan_defaulted",
           entityType: "repayment_plan",
           entityId: plan._id,
-          payload: { installmentIndex: nextInstallmentIdx, failedAttempts: failedForInstallment },
+          payload: { installmentIndex: next.index, failedAttempts: failedForInstallment },
         });
         continue;
       }
@@ -122,7 +98,7 @@ export async function processScheduledPayments() {
           action: "installment_skipped",
           entityType: "repayment_plan",
           entityId: plan._id,
-          payload: { reason: "no_authorization_code", installmentIndex: nextInstallmentIdx + 1 },
+          payload: { reason: "no_authorization_code", installmentIndex: next.index + 1 },
         });
         continue;
       }
@@ -130,14 +106,13 @@ export async function processScheduledPayments() {
       const totalAttempts = await PaymentAttempt.countDocuments({ planId: plan._id });
       const customer = await Customer.findById(plan.customerId);
       const email = customer?.email ?? "customer@repaystream.local";
-      const amount = nextInstallment.amount;
-      const reference = `rs_${plan._id}_inst${nextInstallmentIdx + 1}_${Date.now()}`;
-      const amountKobo = Math.max(Math.round(amount * 100), 200);
+      const reference = `rs_${plan._id}_inst${next.index + 1}_${Date.now()}`;
+      const amountKobo = Math.max(Math.round(chargeAmount * 100), 200);
 
       const attempt = await PaymentAttempt.create({
         planId: plan._id,
         attemptNumber: totalAttempts + 1,
-        amount,
+        amount: chargeAmount,
         status: "pending",
         provider: "paystack",
         externalRef: reference,
@@ -163,10 +138,18 @@ export async function processScheduledPayments() {
         action: "installment_charged",
         entityType: "repayment_plan",
         entityId: plan._id,
-        payload: { installmentIndex: nextInstallmentIdx + 1, amount, provider: "paystack", reference, chargeStatus: result.status },
+        payload: {
+          installmentIndex: next.index + 1,
+          amount: chargeAmount,
+          fullInstallmentAmount: nextInstallment.amount,
+          alreadyPaidOffline: next.alreadyPaid,
+          provider: "paystack",
+          reference,
+          chargeStatus: result.status,
+        },
       });
 
-      console.log(`[scheduler] Charged installment ${nextInstallmentIdx + 1} for plan ${plan._id} — ₦${amount} — ${result.status}`);
+      console.log(`[scheduler] Charged installment ${next.index + 1} for plan ${plan._id} — ₦${chargeAmount} — ${result.status}`);
     } catch (err) {
       console.error(`[scheduler] Error processing plan ${plan._id}:`, err);
     }

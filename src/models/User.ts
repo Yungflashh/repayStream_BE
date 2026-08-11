@@ -6,6 +6,7 @@ const userSchema = new Schema(
     passwordHash: { type: String, required: true },
     resetToken: { type: String, default: null },
     resetTokenExpiry: { type: Date, default: null },
+    notificationsReadAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

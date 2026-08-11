@@ -4,32 +4,9 @@ import { PaymentAttempt } from "../models/PaymentAttempt.js";
 import { Customer } from "../models/Customer.js";
 import { Business } from "../models/Business.js";
 import { dispatchReminder } from "./notifications/dispatcher.js";
+import { parseSchedule, computeNextInstallment } from "../lib/utils/schedule.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-type ScheduleRow = { amount: number; due_date: string };
-
-function parseSchedule(plan: { scheduleJson: unknown; totalAmount: number }): ScheduleRow[] {
-  const sj = plan.scheduleJson;
-  if (Array.isArray(sj) && sj.length > 0) {
-    return sj
-      .filter((r: any) => typeof r.amount === "number" && typeof r.due_date === "string")
-      .map((r: any) => ({ amount: r.amount, due_date: r.due_date }));
-  }
-  if (sj && typeof sj === "object" && !Array.isArray(sj)) {
-    const obj = sj as { type?: string; installments?: any[]; dueDate?: string };
-    if (obj.type === "installments" && Array.isArray(obj.installments)) {
-      return obj.installments.map((x: any) => ({
-        amount: parseFloat(String(x.amount ?? 0)),
-        due_date: String(x.dueDate ?? ""),
-      }));
-    }
-    if (obj.type === "lump_sum" && obj.dueDate) {
-      return [{ amount: plan.totalAmount, due_date: obj.dueDate }];
-    }
-  }
-  return [{ amount: plan.totalAmount, due_date: "" }];
-}
 
 function fmt(amount: number) {
   return `₦${amount.toLocaleString("en-NG")}`;
@@ -218,18 +195,11 @@ export async function processScheduledReminders(): Promise<void> {
   for (const plan of activePlans) {
     try {
       const schedule = parseSchedule(plan);
-
-      // Use cumulative amount to find next installment — count-based indexing
-      // breaks when partial offline payments create extra PaymentAttempt records.
       const successAttempts = await PaymentAttempt.find({ planId: plan._id, status: "success" }).lean();
       const totalPaid = successAttempts.reduce((s, a) => s + a.amount, 0);
-      let rem = totalPaid;
-      let nextInstallmentIdx = schedule.length;
-      for (let i = 0; i < schedule.length; i++) {
-        if (rem >= schedule[i].amount) { rem -= schedule[i].amount; } else { nextInstallmentIdx = i; break; }
-      }
+      const next = computeNextInstallment(schedule, totalPaid);
 
-      const nextInstallment = schedule[nextInstallmentIdx];
+      const nextInstallment = next.row;
       if (!nextInstallment || !nextInstallment.due_date) continue;
 
       const [customer, business] = await Promise.all([
@@ -240,10 +210,13 @@ export async function processScheduledReminders(): Promise<void> {
 
       const customerName = customer.name ?? "";
       const businessName = business?.name ?? "the business";
-      const { amount, due_date } = nextInstallment;
+      // Show the *remaining* amount for this installment — partial offline
+      // payments have already reduced what's owed.
+      const amount = next.dueAmount;
+      const due_date = nextInstallment.due_date;
       const customerId = String(customer._id);
       const planId = String(plan._id);
-      const installmentIdx = nextInstallmentIdx;
+      const installmentIdx = next.index;
 
       // ── Pre-due (T-1): due tomorrow ──────────────────────────────────────
       if (due_date === tomorrowStr) {

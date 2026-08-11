@@ -5,29 +5,9 @@ import { AuditLog } from "../models/AuditLog.js";
 import { verifyPaystackSignature } from "../lib/webhooks/paystack-verify.js";
 import { nextRetryDate } from "../lib/retry-policy.js";
 import { sendFailedAttemptReminder, sendPlanCompletedNotification } from "../services/reminder.js";
+import { isFullyPaid } from "../lib/utils/schedule.js";
 
 const router = Router();
-
-// Returns true when totalPaidAmount fully covers all installments or the plan total.
-// Uses cumulative amounts (not attempt count) so partial offline payments don't
-// prematurely complete a plan.
-function isFullyPaid(plan: { scheduleJson: unknown; totalAmount: number }, totalPaidAmount: number): boolean {
-  if (totalPaidAmount >= plan.totalAmount) return true;
-  const sj = plan.scheduleJson;
-  let schedule: { amount: number }[] = [];
-  if (Array.isArray(sj)) {
-    schedule = sj.filter((r: any) => typeof r.amount === "number").map((r: any) => ({ amount: r.amount }));
-  } else if (sj && typeof sj === "object" && !Array.isArray(sj)) {
-    const obj = sj as { type?: string; installments?: any[]; dueDate?: string };
-    if (obj.type === "installments" && Array.isArray(obj.installments)) {
-      schedule = obj.installments.map((x: any) => ({ amount: parseFloat(String(x.amount ?? 0)) }));
-    }
-  }
-  if (!schedule.length) return false;
-  let rem = totalPaidAmount;
-  for (const row of schedule) { if (rem >= row.amount) { rem -= row.amount; } else { return false; } }
-  return true;
-}
 
 router.post("/paystack", async (req, res) => {
   try {

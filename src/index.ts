@@ -21,6 +21,7 @@ import webhookRoutes from "./routes/webhooks.js";
 import disputeRoutes from "./routes/disputes.js";
 import ledgerRoutes from "./routes/ledger.js";
 import offlinePaymentRoutes from "./routes/offline-payments.js";
+import notificationsRoutes from "./routes/notifications.js";
 import adminRoutes from "./routes/admin.js";
 import analyticsRoutes from "./routes/analytics.js";
 import { requireAuth } from "./middleware/auth.js";
@@ -148,6 +149,7 @@ app.use("/api/webhooks", webhookRoutes);
 app.use("/api/disputes", disputeRoutes);
 app.use("/api/ledger", ledgerRoutes);
 app.use("/api/offline", offlinePaymentRoutes);
+app.use("/api/notifications", notificationsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/analytics", requireAuth, analyticsRoutes);
 

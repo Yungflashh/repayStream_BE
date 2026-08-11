@@ -8,6 +8,7 @@ import { Business } from "../models/Business.js";
 import { User } from "../models/User.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { chargeAuthorization, initializePaystackTransaction } from "../lib/paystack.js";
+import { parseSchedule as parseScheduleShared, computeNextInstallment } from "../lib/utils/schedule.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -141,29 +142,14 @@ router.get("/:id/portal", async (req, res) => {
 
 const APP_URL = () => process.env.PUBLIC_APP_URL ?? "http://localhost:5173";
 
-function parseScheduleForCustomer(plan: { scheduleJson: unknown; totalAmount: number }): { amount: number; due_date: string }[] {
-  const sj = plan.scheduleJson;
-  if (Array.isArray(sj)) return sj.filter((r: any) => typeof r.amount === "number").map((r: any) => ({ amount: r.amount, due_date: r.due_date ?? "" }));
-  if (sj && typeof sj === "object" && !Array.isArray(sj)) {
-    const obj = sj as { type?: string; installments?: any[]; dueDate?: string };
-    if (obj.type === "installments" && Array.isArray(obj.installments)) {
-      return obj.installments.map((x: any) => ({ amount: parseFloat(String(x.amount ?? 0)), due_date: String(x.dueDate ?? "") }));
-    }
-    if (obj.type === "lump_sum" && obj.dueDate) return [{ amount: plan.totalAmount, due_date: obj.dueDate }];
-  }
-  return [{ amount: plan.totalAmount, due_date: "" }];
-}
-
-// Returns the index of the next unpaid installment based on cumulative paid amounts.
-// This correctly handles partial offline payments (count-based indexing does not).
-async function nextInstallmentIndex(planId: unknown, schedule: { amount: number }[]): Promise<number> {
-  const successAttempts = await PaymentAttempt.find({ planId, status: "success" }).lean();
+// Returns the next unpaid installment along with how much is still owed on it.
+// The remaining `dueAmount` accounts for any partial offline payment that has
+// already been applied to that installment, so we never overcharge.
+async function nextInstallmentFor(plan: { _id: unknown; scheduleJson: unknown; totalAmount: number }) {
+  const schedule = parseScheduleShared(plan);
+  const successAttempts = await PaymentAttempt.find({ planId: plan._id, status: "success" }).lean();
   const totalPaid = successAttempts.reduce((s, a) => s + a.amount, 0);
-  let rem = totalPaid;
-  for (let i = 0; i < schedule.length; i++) {
-    if (rem >= schedule[i].amount) { rem -= schedule[i].amount; } else { return i; }
-  }
-  return schedule.length;
+  return { schedule, ...computeNextInstallment(schedule, totalPaid) };
 }
 
 // 6-hour window for pending-attempt dedup — matches the scheduler's stale threshold.
@@ -189,18 +175,19 @@ router.post("/:id/plans/:planId/retry-debit", async (req, res) => {
     const existingPending = await PaymentAttempt.findOne(recentPendingQuery(plan._id));
     if (existingPending) return res.status(409).json({ error: "A payment is already in progress for this plan." });
 
-    const schedule = parseScheduleForCustomer(plan);
-    const nextIdx = await nextInstallmentIndex(plan._id, schedule);
-    const nextInstallment = schedule[nextIdx];
-    if (!nextInstallment) return res.status(400).json({ error: "No installment to retry" });
+    const next = await nextInstallmentFor(plan);
+    if (!next.row || next.dueAmount <= 0) return res.status(400).json({ error: "No installment to retry" });
 
     const email = customer.email ?? "customer@repaystream.local";
     const reference = `rs_retry_${plan._id}_${Date.now()}`;
-    const amountKobo = Math.max(Math.round(nextInstallment.amount * 100), 200);
+    // Charge only the remaining owed portion — partial offline payments already
+    // covered part of this installment and must not be double-collected.
+    const chargeAmount = next.dueAmount;
+    const amountKobo = Math.max(Math.round(chargeAmount * 100), 200);
     const totalAttempts = await PaymentAttempt.countDocuments({ planId: plan._id });
 
     const attempt = await PaymentAttempt.create({
-      planId: plan._id, attemptNumber: totalAttempts + 1, amount: nextInstallment.amount,
+      planId: plan._id, attemptNumber: totalAttempts + 1, amount: chargeAmount,
       status: "pending", provider: "paystack", externalRef: reference, idempotencyKey: reference,
     });
 
@@ -245,18 +232,18 @@ router.post("/:id/plans/:planId/pay-now", async (req, res) => {
     const existingPending = await PaymentAttempt.findOne(recentPendingQuery(plan._id));
     if (existingPending) return res.status(409).json({ error: "A payment is already in progress for this plan." });
 
-    const schedule = parseScheduleForCustomer(plan);
-    const nextIdx = await nextInstallmentIndex(plan._id, schedule);
-    const nextInstallment = schedule[nextIdx];
-    if (!nextInstallment) return res.status(400).json({ error: "All installments are paid" });
+    const next = await nextInstallmentFor(plan);
+    if (!next.row || next.dueAmount <= 0) return res.status(400).json({ error: "All installments are paid" });
 
     const email = customer.email ?? "customer@repaystream.local";
     const reference = `rs_manual_${plan._id}_${Date.now()}`;
-    const amountKobo = Math.max(Math.round(nextInstallment.amount * 100), 200);
+    // Bill only the remaining owed amount for the next installment.
+    const chargeAmount = next.dueAmount;
+    const amountKobo = Math.max(Math.round(chargeAmount * 100), 200);
     const totalAttempts = await PaymentAttempt.countDocuments({ planId: plan._id });
 
     await PaymentAttempt.create({
-      planId: plan._id, attemptNumber: totalAttempts + 1, amount: nextInstallment.amount,
+      planId: plan._id, attemptNumber: totalAttempts + 1, amount: chargeAmount,
       status: "pending", provider: "paystack", externalRef: reference, idempotencyKey: reference,
     });
 
